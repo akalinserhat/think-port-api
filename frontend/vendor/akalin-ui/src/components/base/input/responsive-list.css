@@ -1,0 +1,9 @@
+/* Appended list container responsive heights */
+.responsive-list-min-h {
+    min-height: 150px;
+}
+@media (max-width: 768px) {
+    .responsive-list-min-h {
+        min-height: 80px;
+    }
+}

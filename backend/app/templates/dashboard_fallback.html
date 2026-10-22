@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="tr" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gateway — Yönetim & AI Sohbet Konsolu</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #09090b; color: #fafafa; -webkit-font-smoothing: antialiased; }
+    .hairline { border-color: rgba(255, 255, 255, 0.07); }
+    .surface { background-color: #111113; }
+  </style>
+</head>
+<body class="min-h-screen font-sans flex items-center justify-center p-6">
+  <div class="max-w-lg w-full surface border hairline rounded-xl p-6 space-y-4">
+    <div class="flex items-center justify-between">
+      <h1 class="text-sm font-semibold text-zinc-100">AI Browser Gateway v2.0</h1>
+      <span class="text-xs font-mono text-emerald-400">Clean Architecture Active</span>
+    </div>
+    <p class="text-xs text-zinc-400 leading-relaxed">
+      API Gateway servisi çalışıyor. OpenAI uyumlu uç noktalar (<code>/v1/models</code>, <code>/v1/chat/completions</code>, <code>/v1/images/generations</code>) ve Admin API (<code>/admin/state</code>) kullanıma hazır.
+    </p>
+    <div class="flex gap-3 pt-2">
+      <a href="/docs" class="px-4 py-2 rounded-lg bg-zinc-100 text-zinc-950 text-xs font-medium">OpenAPI Docs ↗</a>
+      <a href="/v1/models" class="px-4 py-2 rounded-lg border hairline text-zinc-300 text-xs font-mono">/v1/models</a>
+    </div>
+  </div>
+</body>
+</html>

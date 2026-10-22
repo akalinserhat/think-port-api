@@ -1,0 +1,63 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  darkMode: 'class',
+  content: [
+    './index.html',
+    './src/**/*.{js,ts,jsx,tsx}',
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['"Plus Jakarta Sans"', '"Inter"', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'monospace'],
+      },
+      colors: {
+        md: {
+          primary: 'var(--md-sys-color-primary)',
+          'on-primary': 'var(--md-sys-color-on-primary)',
+          'primary-container': 'var(--md-sys-color-primary-container)',
+          'on-primary-container': 'var(--md-sys-color-on-primary-container)',
+          secondary: 'var(--md-sys-color-secondary)',
+          'on-secondary': 'var(--md-sys-color-on-secondary)',
+          'secondary-container': 'var(--md-sys-color-secondary-container)',
+          'on-secondary-container': 'var(--md-sys-color-on-secondary-container)',
+          tertiary: 'var(--md-sys-color-tertiary)',
+          'on-tertiary': 'var(--md-sys-color-on-tertiary)',
+          'tertiary-container': 'var(--md-sys-color-tertiary-container)',
+          'on-tertiary-container': 'var(--md-sys-color-on-tertiary-container)',
+          error: 'var(--md-sys-color-error)',
+          'on-error': 'var(--md-sys-color-on-error)',
+          'error-container': 'var(--md-sys-color-error-container)',
+          'on-error-container': 'var(--md-sys-color-on-error-container)',
+          surface: 'var(--md-sys-color-surface)',
+          'on-surface': 'var(--md-sys-color-on-surface)',
+          'surface-variant': 'var(--md-sys-color-surface-variant)',
+          'on-surface-variant': 'var(--md-sys-color-on-surface-variant)',
+          'surface-container-lowest': 'var(--md-sys-color-surface-container-lowest)',
+          'surface-container-low': 'var(--md-sys-color-surface-container-low)',
+          'surface-container': 'var(--md-sys-color-surface-container)',
+          'surface-container-high': 'var(--md-sys-color-surface-container-high)',
+          'surface-container-highest': 'var(--md-sys-color-surface-container-highest)',
+          outline: 'var(--md-sys-color-outline)',
+          'outline-variant': 'var(--md-sys-color-outline-variant)',
+          'inverse-surface': 'var(--md-sys-color-inverse-surface)',
+          'inverse-on-surface': 'var(--md-sys-color-inverse-on-surface)',
+          'inverse-primary': 'var(--md-sys-color-inverse-primary)',
+        },
+      },
+      borderRadius: {
+        'md3-xs': '4px',
+        'md3-sm': '8px',
+        'md3-md': '12px',
+        'md3-lg': '16px',
+        'md3-xl': '28px',
+      },
+      boxShadow: {
+        'md3-1': '0px 1px 2px rgba(0, 0, 0, 0.14), 0px 1px 3px 1px rgba(0, 0, 0, 0.08)',
+        'md3-2': '0px 1px 2px rgba(0, 0, 0, 0.18), 0px 2px 6px 2px rgba(0, 0, 0, 0.10)',
+        'md3-3': '0px 4px 8px 3px rgba(0, 0, 0, 0.12), 0px 1px 3px rgba(0, 0, 0, 0.20)',
+      },
+    },
+  },
+  plugins: [],
+};

@@ -1,0 +1,190 @@
+/* Typograhy */
+h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.5px; }
+h2 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+
+/* Buttons */
+.btn {
+  padding: 12px 24px;
+  border-radius: var(--md3-shape-large);
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+  box-shadow: none !important;
+}
+
+.btn-primary {
+  background-color: var(--accent-primary);
+  color: white;
+  box-shadow: var(--md3-elevation-1);
+}
+
+.btn-primary:hover {
+  background-color: var(--accent-hover);
+  box-shadow: var(--md3-elevation-2);
+  transform: translateY(-2px);
+}
+
+.btn-outline {
+  background-color: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: none;
+}
+
+.btn-outline:hover {
+  background-color: var(--hover-bg);
+  border-color: var(--text-secondary) !important;
+}
+
+.btn-sm {
+  padding: 0 12px;
+  font-size: 13px;
+  height: 34px;
+  border-radius: var(--md3-shape-medium);
+}
+
+.btn-outline-secondary {
+  background-color: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: none;
+}
+
+.btn-outline-secondary:hover {
+  background-color: var(--hover-bg);
+  border-color: var(--accent-primary) !important;
+  color: var(--accent-primary);
+}
+
+/* Adres Seçici Butonu: Veri giriş alanları (.form-input) ile aynı yükseklikte (42px) ve yatayda kompakt */
+.adres-secici-btn {
+  height: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  padding: 0 14px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+  border-radius: var(--md3-shape-medium) !important;
+  border: 1px solid var(--glass-border) !important;
+  background-color: var(--bg-secondary) !important;
+  color: var(--text-primary) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  cursor: pointer;
+  box-sizing: border-box !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.adres-secici-btn:hover {
+  background-color: var(--hover-bg) !important;
+  border-color: var(--accent-primary) !important;
+  color: var(--accent-primary) !important;
+  transform: translateY(-1px);
+}
+
+.adres-secici-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Chips */
+.chip-primary {
+  background-color: var(--accent-primary);
+  color: white;
+  box-shadow: 0 4px 14px 0 rgba(99, 102, 241, 0.25);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--md3-shape-large);
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  transition: all 0.2s;
+}
+
+.chip-primary:hover {
+  background-color: var(--accent-hover);
+  box-shadow: var(--md3-elevation-2);
+  transform: translateY(-1px);
+}
+
+.btn-icon {
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--md3-shape-large);
+  transition: all 0.2s;
+  cursor: pointer;
+  border: none;
+}
+
+.btn-icon:hover {
+  background: var(--bg-primary);
+  color: var(--accent-primary);
+}
+
+/* Save Action Button */
+.save-action-btn {
+  background: var(--accent-primary);
+  color: white;
+  height: 32px;
+  border-radius: var(--md3-shape-medium);
+  justify-content: center;
+  padding: 0 16px;
+  width: auto;
+}
+
+.save-action-btn:hover {
+  background: var(--accent-hover);
+  color: white;
+}
+
+.save-action-btn.icon-only {
+  width: 64px;
+  padding: 0;
+}
+
+/* Cancel Action Button */
+.btn-cancel {
+  background-color: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--glass-border);
+  box-shadow: none;
+}
+.btn-cancel:hover {
+  background-color: var(--hover-bg);
+  color: var(--text-primary);
+}
+
+/* Back Action Button */
+.btn-back {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+.btn-back:hover {
+  color: var(--text-primary);
+}

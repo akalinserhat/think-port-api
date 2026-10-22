@@ -1,0 +1,45 @@
+# macOS / OS
+.DS_Store
+Thumbs.db
+
+# Python / Backend
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Database & Runtime Logs
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/logs/*.log
+*.log
+*.sqlite
+*.sqlite3
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.npm
+.eslintcache
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

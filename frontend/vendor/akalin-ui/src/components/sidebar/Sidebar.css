@@ -1,0 +1,851 @@
+/**
+ * Akalin UI - Modern, Domain-Agnostic Sidebar Component Styles
+ * Conforming strictly to Material Design 3 and BEM naming conventions.
+ * Zero inline CSS architecture.
+ */
+
+:root {
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 72px;
+  --sidebar-bg: var(--color-surface, #ffffff);
+  --sidebar-surface-hover: var(--color-surface-hover, rgba(15, 23, 42, 0.05));
+  --sidebar-surface-active: var(--color-surface-active, rgba(14, 116, 144, 0.08));
+  --sidebar-accent: var(--color-primary, #0e7490);
+  --sidebar-accent-contrast: var(--color-primary-contrast, #ffffff);
+  --sidebar-border-color: var(--color-border, #e2e8f0);
+  --sidebar-text: var(--color-text-main, #1e293b);
+  --sidebar-text-muted: var(--color-text-muted, #64748b);
+  --sidebar-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.06), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
+  --sidebar-flyout-bg: var(--color-surface, #ffffff);
+  --sidebar-flyout-border: var(--color-border, #cbd5e1);
+  --sidebar-flyout-shadow: 0 12px 30px -4px rgba(15, 23, 42, 0.16), 0 6px 12px -3px rgba(15, 23, 42, 0.08);
+
+  /* Badge color tokens */
+  --sidebar-badge-primary-bg: #e0f2fe;
+  --sidebar-badge-primary-text: #0369a1;
+  --sidebar-badge-secondary-bg: #f1f5f9;
+  --sidebar-badge-secondary-text: #475569;
+  --sidebar-badge-success-bg: #dcfce7;
+  --sidebar-badge-success-text: #15803d;
+  --sidebar-badge-warning-bg: #fef3c7;
+  --sidebar-badge-warning-text: #b45309;
+  --sidebar-badge-danger-bg: #ffe4e6;
+  --sidebar-badge-danger-text: #be123c;
+  --sidebar-badge-info-bg: #e0e7ff;
+  --sidebar-badge-info-text: #4338ca;
+}
+
+/* Dark mode styling overrides */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sidebar-bg: var(--color-surface, #0f172a);
+    --sidebar-surface-hover: var(--color-surface-hover, rgba(255, 255, 255, 0.06));
+    --sidebar-surface-active: var(--color-surface-active, rgba(56, 189, 248, 0.14));
+    --sidebar-accent: var(--color-primary, #38bdf8);
+    --sidebar-border-color: var(--color-border, #1e293b);
+    --sidebar-text: var(--color-text-main, #f8fafc);
+    --sidebar-text-muted: var(--color-text-muted, #94a3b8);
+    --sidebar-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4);
+    --sidebar-flyout-bg: var(--color-surface, #1e293b);
+    --sidebar-flyout-border: var(--color-border, #334155);
+    --sidebar-flyout-shadow: 0 16px 36px -4px rgba(0, 0, 0, 0.6), 0 6px 14px -3px rgba(0, 0, 0, 0.4);
+
+    --sidebar-badge-primary-bg: rgba(56, 189, 248, 0.2);
+    --sidebar-badge-primary-text: #7dd3fc;
+    --sidebar-badge-secondary-bg: #334155;
+    --sidebar-badge-secondary-text: #cbd5e1;
+    --sidebar-badge-success-bg: rgba(34, 197, 94, 0.2);
+    --sidebar-badge-success-text: #86efac;
+    --sidebar-badge-warning-bg: rgba(245, 158, 11, 0.2);
+    --sidebar-badge-warning-text: #fde047;
+    --sidebar-badge-danger-bg: rgba(244, 63, 94, 0.2);
+    --sidebar-badge-danger-text: #fda4af;
+    --sidebar-badge-info-bg: rgba(99, 102, 241, 0.2);
+    --sidebar-badge-info-text: #a5b4fc;
+  }
+}
+
+[data-theme="dark"], .dark {
+  --sidebar-bg: var(--color-surface, #0f172a);
+  --sidebar-surface-hover: var(--color-surface-hover, rgba(255, 255, 255, 0.06));
+  --sidebar-surface-active: var(--color-surface-active, rgba(56, 189, 248, 0.14));
+  --sidebar-accent: var(--color-primary, #38bdf8);
+  --sidebar-border-color: var(--color-border, #1e293b);
+  --sidebar-text: var(--color-text-main, #f8fafc);
+  --sidebar-text-muted: var(--color-text-muted, #94a3b8);
+  --sidebar-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.4);
+  --sidebar-flyout-bg: var(--color-surface, #1e293b);
+  --sidebar-flyout-border: var(--color-border, #334155);
+  --sidebar-flyout-shadow: 0 16px 36px -4px rgba(0, 0, 0, 0.6), 0 6px 14px -3px rgba(0, 0, 0, 0.4);
+
+  --sidebar-badge-primary-bg: rgba(56, 189, 248, 0.2);
+  --sidebar-badge-primary-text: #7dd3fc;
+  --sidebar-badge-secondary-bg: #334155;
+  --sidebar-badge-secondary-text: #cbd5e1;
+  --sidebar-badge-success-bg: rgba(34, 197, 94, 0.2);
+  --sidebar-badge-success-text: #86efac;
+  --sidebar-badge-warning-bg: rgba(245, 158, 11, 0.2);
+  --sidebar-badge-warning-text: #fde047;
+  --sidebar-badge-danger-bg: rgba(244, 63, 94, 0.2);
+  --sidebar-badge-danger-text: #fda4af;
+  --sidebar-badge-info-bg: rgba(99, 102, 241, 0.2);
+  --sidebar-badge-info-text: #a5b4fc;
+}
+
+/* ==========================================================================
+   Main Sidebar Container
+   ========================================================================== */
+
+.akalin-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  max-width: var(--sidebar-width);
+  height: 100vh;
+  position: relative;
+  background-color: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-border-color);
+  box-sizing: border-box;
+  user-select: none;
+  z-index: 50;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              min-width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              max-width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  color: var(--sidebar-text);
+  font-family: inherit;
+}
+
+.akalin-sidebar.akalin-sidebar--collapsed {
+  width: var(--sidebar-collapsed-width);
+  min-width: var(--sidebar-collapsed-width);
+  max-width: var(--sidebar-collapsed-width);
+}
+
+/* ==========================================================================
+   Header Slot
+   ========================================================================== */
+
+.akalin-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  min-height: 64px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--sidebar-border-color);
+  gap: 12px;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-header {
+  padding: 16px 8px;
+  justify-content: center;
+}
+
+.akalin-sidebar-logo-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+}
+
+.akalin-sidebar-logo-container.is-interactive:hover .akalin-sidebar-logo-title {
+  color: var(--sidebar-accent);
+}
+
+.akalin-sidebar-logo {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+}
+
+.akalin-sidebar-logo-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-logo-text {
+  display: none;
+}
+
+.akalin-sidebar-logo-title {
+  font-size: 0.975rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--sidebar-text);
+  line-height: 1.25;
+}
+
+.akalin-sidebar-logo-subtitle {
+  font-size: 0.75rem;
+  color: var(--sidebar-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
+}
+
+/* ==========================================================================
+   Collapse Toggle Button
+   ========================================================================== */
+
+.akalin-sidebar-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--sidebar-border-color);
+  background: var(--sidebar-bg);
+  color: var(--sidebar-text-muted);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  box-sizing: border-box;
+}
+
+.akalin-sidebar-toggle-btn:hover {
+  background: var(--sidebar-surface-hover);
+  color: var(--sidebar-text);
+  border-color: var(--sidebar-border-color);
+}
+
+.akalin-sidebar-toggle-btn:active {
+  transform: scale(0.96);
+}
+
+/* ==========================================================================
+   Search / Quick Filter Bar
+   ========================================================================== */
+
+.akalin-sidebar-search-container {
+  padding: 12px 14px 6px 14px;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-search-container {
+  padding: 12px 8px 6px 8px;
+  display: flex;
+  justify-content: center;
+}
+
+.akalin-sidebar-search-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.akalin-sidebar-search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--sidebar-text-muted);
+  pointer-events: none;
+  display: inline-flex;
+}
+
+.akalin-sidebar-search-input {
+  width: 100%;
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0 32px 0 34px;
+  border-radius: 8px;
+  border: 1px solid var(--sidebar-border-color);
+  background-color: var(--sidebar-surface-hover);
+  color: var(--sidebar-text);
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.akalin-sidebar-search-input:focus {
+  background-color: var(--sidebar-bg);
+  border-color: var(--sidebar-accent);
+  box-shadow: 0 0 0 2px var(--sidebar-surface-active);
+}
+
+.akalin-sidebar-search-clear {
+  position: absolute;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  color: var(--sidebar-text-muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.akalin-sidebar-search-clear:hover {
+  background-color: var(--sidebar-surface-hover);
+  color: var(--sidebar-text);
+}
+
+.akalin-sidebar-search-rail-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--sidebar-text-muted);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.akalin-sidebar-search-rail-btn:hover {
+  background-color: var(--sidebar-surface-hover);
+  color: var(--sidebar-text);
+}
+
+/* ==========================================================================
+   Navigation Area & Item List
+   ========================================================================== */
+
+.akalin-sidebar-nav {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 0;
+  box-sizing: border-box;
+}
+
+/* Slim modern scrollbar */
+.akalin-sidebar-nav::-webkit-scrollbar {
+  width: 5px;
+}
+
+.akalin-sidebar-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.akalin-sidebar-nav::-webkit-sidebar-thumb,
+.akalin-sidebar-nav::-webkit-scrollbar-thumb {
+  background: var(--sidebar-border-color);
+  border-radius: 4px;
+}
+
+.akalin-sidebar-nav::-webkit-scrollbar-thumb:hover {
+  background: var(--sidebar-text-muted);
+}
+
+.akalin-sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-sizing: border-box;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-list {
+  padding: 0 6px;
+  align-items: center;
+}
+
+/* ==========================================================================
+   Sidebar Item & Link
+   ========================================================================== */
+
+.akalin-sidebar-item {
+  width: 100%;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.akalin-sidebar-link {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 42px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  color: var(--sidebar-text);
+  text-decoration: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+  position: relative;
+  transition: background-color 0.18s ease, color 0.18s ease, transform 0.12s ease;
+  user-select: none;
+}
+
+.akalin-sidebar-link:hover:not(.is-disabled) {
+  background-color: var(--sidebar-surface-hover);
+}
+
+.akalin-sidebar-link:active:not(.is-disabled) {
+  transform: scale(0.985);
+}
+
+.akalin-sidebar-link.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Collapsed rail link */
+.akalin-sidebar--collapsed .akalin-sidebar-link {
+  width: 46px;
+  height: 46px;
+  min-height: 46px;
+  padding: 0;
+  justify-content: center;
+  margin: 2px auto;
+  border-radius: 12px;
+}
+
+/* Active State Highlighting */
+.akalin-sidebar-link.is-active {
+  background-color: var(--sidebar-surface-active);
+  color: var(--sidebar-accent);
+  font-weight: 600;
+}
+
+.akalin-sidebar-link.is-active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3.5px;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--sidebar-accent);
+}
+
+/* Child active indicator for parent group */
+.akalin-sidebar-item.is-child-active > .akalin-sidebar-link:not(.is-active) {
+  color: var(--sidebar-accent);
+  font-weight: 600;
+}
+
+.akalin-sidebar-item.is-child-active > .akalin-sidebar-link:not(.is-active)::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 4px 4px 0;
+  background-color: var(--sidebar-accent);
+  opacity: 0.6;
+}
+
+/* Rail collapsed active/child-active dot indicator */
+.akalin-sidebar--collapsed .akalin-sidebar-link.is-active::before {
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 4px;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-item.is-child-active > .akalin-sidebar-link:not(.is-active)::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--sidebar-accent);
+}
+
+/* ==========================================================================
+   Item Elements (Icon, Label, Badge, Arrow)
+   ========================================================================== */
+
+.akalin-sidebar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  flex-shrink: 0;
+  color: inherit;
+  transition: transform 0.18s ease;
+}
+
+.akalin-sidebar-link:hover:not(.is-disabled) .akalin-sidebar-icon {
+  transform: scale(1.06);
+}
+
+.akalin-sidebar-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-label {
+  display: none;
+}
+
+.akalin-sidebar-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 7px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 999px;
+  line-height: 1.2;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-badge {
+  display: none;
+}
+
+.akalin-sidebar-badge--primary {
+  background-color: var(--sidebar-badge-primary-bg);
+  color: var(--sidebar-badge-primary-text);
+}
+
+.akalin-sidebar-badge--secondary {
+  background-color: var(--sidebar-badge-secondary-bg);
+  color: var(--sidebar-badge-secondary-text);
+}
+
+.akalin-sidebar-badge--success {
+  background-color: var(--sidebar-badge-success-bg);
+  color: var(--sidebar-badge-success-text);
+}
+
+.akalin-sidebar-badge--warning {
+  background-color: var(--sidebar-badge-warning-bg);
+  color: var(--sidebar-badge-warning-text);
+}
+
+.akalin-sidebar-badge--danger {
+  background-color: var(--sidebar-badge-danger-bg);
+  color: var(--sidebar-badge-danger-text);
+}
+
+.akalin-sidebar-badge--info {
+  background-color: var(--sidebar-badge-info-bg);
+  color: var(--sidebar-badge-info-text);
+}
+
+.akalin-sidebar-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  margin-left: 4px;
+  color: var(--sidebar-text-muted);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.akalin-sidebar-arrow.is-expanded {
+  transform: rotate(90deg);
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-arrow {
+  display: none;
+}
+
+/* ==========================================================================
+   Smooth Accordion Submenu (CSS Grid height transition)
+   ========================================================================== */
+
+.akalin-sidebar-submenu {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.akalin-sidebar-submenu.is-expanded {
+  grid-template-rows: 1fr;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-submenu {
+  display: none;
+}
+
+.akalin-sidebar-submenu-inner {
+  overflow: hidden;
+  margin-left: 20px;
+  padding-left: 10px;
+  border-left: 1.5px solid var(--sidebar-border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.akalin-sidebar-submenu-inner .akalin-sidebar-link {
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  border-radius: 8px;
+}
+
+.akalin-sidebar-submenu-inner .akalin-sidebar-icon {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+}
+
+/* ==========================================================================
+   Footer Slot
+   ========================================================================== */
+
+.akalin-sidebar-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--sidebar-border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-footer {
+  padding: 12px 8px;
+  justify-content: center;
+}
+
+.akalin-sidebar-footer-custom {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.akalin-sidebar--collapsed .akalin-sidebar-footer-custom {
+  display: none;
+}
+
+/* Empty Search Results */
+.akalin-sidebar-empty-search {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--sidebar-text-muted);
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ==========================================================================
+   Flyout Popover Panel (Collapsed Rail Mode)
+   ========================================================================== */
+
+.akalin-sidebar-flyout {
+  position: fixed;
+  z-index: 9999;
+  background-color: var(--sidebar-flyout-bg);
+  border: 1px solid var(--sidebar-flyout-border);
+  border-radius: 12px;
+  box-shadow: var(--sidebar-flyout-shadow);
+  min-width: 220px;
+  max-width: 320px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-sizing: border-box;
+  animation: akalin-flyout-fade-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  color: var(--sidebar-text);
+  font-family: inherit;
+}
+
+/* Safe Hover Bridge: Invisible pseudo-element spanning the gap to prevent accidental closing */
+.akalin-sidebar-flyout::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -14px;
+  width: 14px;
+}
+
+@keyframes akalin-flyout-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.akalin-sidebar-flyout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--sidebar-border-color);
+  background-color: var(--sidebar-surface-hover);
+  border-top-left-radius: 11px;
+  border-top-right-radius: 11px;
+  gap: 8px;
+}
+
+.akalin-sidebar-flyout-header-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.akalin-sidebar-flyout-title {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--sidebar-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.akalin-sidebar-flyout-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.akalin-sidebar-flyout-item {
+  width: 100%;
+}
+
+.akalin-sidebar-flyout-link {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--sidebar-text);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  user-select: none;
+}
+
+.akalin-sidebar-flyout-link:hover:not(.is-disabled) {
+  background-color: var(--sidebar-surface-hover);
+}
+
+.akalin-sidebar-flyout-link.is-active {
+  background-color: var(--sidebar-surface-active);
+  color: var(--sidebar-accent);
+  font-weight: 600;
+}
+
+.akalin-sidebar-flyout-link.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.akalin-sidebar-flyout-link .akalin-sidebar-icon {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+}
+
+.akalin-sidebar-flyout-link .akalin-sidebar-label {
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.akalin-sidebar-flyout-link .akalin-sidebar-badge {
+  display: inline-flex;
+}
+
+/* Tooltip Variant for single rail items without children */
+.akalin-sidebar-flyout--tooltip {
+  min-width: auto;
+  max-width: 240px;
+  padding: 6px 12px;
+  font-size: 0.825rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   Mobile Responsive & Drawer Mode
+   ========================================================================== */
+
+.akalin-sidebar-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 998;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.akalin-sidebar-overlay.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (max-width: 768px) {
+  .akalin-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 999;
+    box-shadow: var(--sidebar-flyout-shadow);
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+                width 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .akalin-sidebar.akalin-sidebar--mobile-open {
+    transform: translateX(0);
+  }
+}

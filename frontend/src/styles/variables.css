@@ -1,0 +1,123 @@
+/**
+ * Webakus ERP - Global CSS Değişkenleri ve Tema Tanımları (variables.css)
+ * Aydınlık (Light) ve Karanlık (Dark) tema renk paletlerini, Material Design 3 (MD3)
+ * belirteçlerini ve yüzey değişkenlerini merkezi olarak yönetir.
+ */
+:root {
+  --bg-app: linear-gradient(135deg, #e6f0ff 0%, #ffffff 100%);
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-glass: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --text-primary: #111827;
+  --text-secondary: #64748b;
+  --accent-primary: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-light: rgba(79, 70, 229, 0.08);
+  --danger: #ef4444;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --hover-bg: rgba(0, 0, 0, 0.03);
+  --input-bg: #ffffff;
+  --sidebar-width: 270px;
+  --modal-left-offset: 270px;
+
+  /* Surface & Border Tokens */
+  --surface-card: #ffffff;
+  --surface-ground: #f8fafc;
+  --surface-secondary: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-surface: #ffffff;
+  --border-color: rgba(0, 0, 0, 0.08);
+
+  /* @akalin/ui Sidebar Theme Token Bridge */
+  --color-surface: var(--bg-secondary);
+  --color-surface-hover: var(--hover-bg);
+  --color-surface-active: var(--accent-light);
+  --color-primary: var(--accent-primary);
+  --color-primary-contrast: #ffffff;
+  --color-border: var(--glass-border);
+  --color-text-main: var(--text-primary);
+  --color-text-muted: var(--text-secondary);
+
+  /* MD3 Design Tokens */
+  --md3-shape-small: 4px;
+  --md3-shape-medium: 6px;
+  --md3-shape-large: 12px;
+  --md3-shape-full: 9999px;
+  --md3-elevation-1: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --md3-elevation-2: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+
+  /* Layout Spacing Tokens (Single Source of Truth for Webakus.UI & Webakus.AdminUI) */
+  --content-area-padding: 16px 24px 24px 24px;
+  --page-card-padding: 24px;
+  --page-header-padding: 20px 24px;
+  --page-header-margin-bottom: 16px;
+  --page-card-border-radius: 16px;
+  --page-inner-border-radius: 16px;
+}
+
+[data-theme='dark'] {
+  /* Linear & Vercel Inspired Premium Dark Palette */
+  --bg-app: #000000;
+  --bg-primary: #000000;
+  --bg-secondary: #0c0c0e;
+  --bg-glass: rgba(12, 12, 14, 0.8);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --text-primary: #fcfcfc;
+  --text-secondary: #8b8d98;
+  --accent-primary: #6b7aec; /* Premium glowing indigo */
+  --accent-hover: #818cf8;
+  --accent-light: rgba(107, 122, 236, 0.12);
+  --danger: #ff5c5c;
+  --success: #3dd68c;
+  --warning: #ffb020;
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --input-bg: rgba(255, 255, 255, 0.03);
+
+  /* Surface & Border Tokens for Dark Theme */
+  --surface-card: #121217;
+  --surface-ground: #0a0a0d;
+  --surface-secondary: #18181f;
+  --bg-card: #18181f;
+  --bg-surface: #18181f;
+  --border-color: rgba(255, 255, 255, 0.08);
+
+  /* @akalin/ui Sidebar Theme Token Bridge (Dark) */
+  --color-surface: var(--bg-secondary);
+  --color-surface-hover: var(--hover-bg);
+  --color-surface-active: var(--accent-light);
+  --color-primary: var(--accent-primary);
+  --color-primary-contrast: #ffffff;
+  --color-border: var(--glass-border);
+  --color-text-main: var(--text-primary);
+  --color-text-muted: var(--text-secondary);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+input, select, textarea {
+  color: var(--text-primary);
+}
+
+/* Override Webkit Autofill styling to match theme */
+input:-webkit-autofill,
+input:-webkit-autofill:hover, 
+input:-webkit-autofill:focus, 
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-primary) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}

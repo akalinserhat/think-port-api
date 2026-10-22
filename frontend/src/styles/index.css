@@ -1,0 +1,10 @@
+/**
+ * Webakus UI Core - Design System & Global Styles
+ * CSS design system tokens, layout, buttons, components, mobile, and utilities.
+ */
+@import './variables.css';
+@import './layout.css';
+@import './buttons.css';
+@import './components.css';
+@import './mobile.css';
+@import './utilities.css';

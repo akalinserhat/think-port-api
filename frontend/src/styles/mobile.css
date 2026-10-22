@@ -1,0 +1,304 @@
+
+/* --- New Menu Toggle Rules --- */
+.mobile-menu-toggle-container {
+  display: none !important;
+}
+
+@media (max-width: 768px) {
+  .mobile-menu-toggle-container {
+    display: flex !important;
+  }
+  .desktop-sidebar-toggle {
+    display: none !important;
+  }
+}
+
+
+/* Desktop Defaults for Split Pane */
+.responsive-split {
+  display: flex;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+.responsive-split > .pane-left {
+  width: 400px;
+}
+.responsive-split > .pane-right {
+  flex: 1;
+}
+
+/* Mobile Media Queries */
+@media (max-width: 768px) {
+  :root {
+    --modal-left-offset: 0px;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    margin: 0;
+    border-radius: 0;
+    border-left: none;
+    border-top: none;
+    border-bottom: none;
+    width: 280px;
+    height: 100dvh;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1000;
+    box-shadow: 4px 0 24px rgba(0,0,0,0.15);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  
+  .menu-toggle {
+    display: block;
+    cursor: pointer;
+  }
+
+  .header {
+    padding: 0 clamp(4px, 3vw, 24px);
+    gap: 8px !important;
+  }
+  
+  .search-type-selector span {
+    display: none;
+  }
+  
+  .search-type-selector {
+    padding: 0 8px !important;
+  }
+  
+  :root {
+    --content-area-padding: 12px clamp(4px, 3vw, 24px);
+    --page-card-padding: 16px;
+    --page-header-padding: 14px 16px;
+    --page-header-margin-bottom: 12px;
+  }
+
+  .content-area {
+    padding: var(--content-area-padding);
+  }
+  
+  .content-area.content-area-document {
+    overflow-y: auto !important;
+  }
+  
+  .data-table-container.surface-card {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  /* Split Pane on Mobile */
+  .responsive-split {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .responsive-split > .pane-left,
+  .responsive-split > .pane-right {
+    width: 100% !important;
+    flex: none;
+    overflow-y: visible !important;
+  }
+
+  /* --- UX İyileştirmeleri (Dokunma Hedefleri & Fontlar) --- */
+  
+  /* 1. Dokunma Hedeflerini (Touch Targets) Büyütme */
+  .btn, 
+  .split-btn-main, 
+  .split-btn-dropdown {
+    padding-top: 14px;
+    padding-bottom: 14px;
+    min-height: 52px;
+    font-size: 16px !important;
+  }
+
+  /* 2. Form Inputları ve Etiketleri Büyütme */
+  .form-group label {
+    font-size: 15px !important;
+    margin-bottom: 8px !important;
+  }
+
+  .form-input, 
+  select, 
+  textarea {
+    font-size: 16px !important; /* iOS Zoom sorununu engeller */
+    padding: 14px 16px;
+    min-height: 52px;
+  }
+
+  /* 3. Kart Boşluklarını Optimize Etme */
+  .surface-card,
+  .form-header,
+  .form-detail {
+    padding: 16px !important;
+  }
+
+  /* 4. Menü ve Liste Elemanlarını Büyütme */
+  .dropdown-menu-item,
+  .tree-node,
+  .nav-link {
+    padding: 16px 18px;
+    min-height: 52px;
+  }
+
+  .tree-node-label,
+  .premium-item-left,
+  .premium-item-text {
+    font-size: 16px !important;
+  }
+
+  /* 5. Alt sekmeler (Tabs) dokunma alanı ve Yazı Büyüklüğü */
+  .tab-btn {
+    padding: 18px 12px;
+    font-size: 16px !important;
+  }
+
+  /* Barkod vb liste kartları içindeki metinler */
+  .surface-card p,
+  .surface-card span {
+    font-size: 15px;
+  }
+
+  /* 6. Form/Kart Ekranlarının Mobilde Tam Ekran Olması */
+  .modal-wrapper {
+    padding: 0 !important;
+  }
+  
+  .modal-backdrop-only,
+  .modal-wrapper > .surface-card {
+    max-height: 100dvh !important;
+    height: 100dvh !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    border-radius: 0 !important;
+    border: none !important;
+    margin: 0 !important;
+  }
+
+  .desktop-modal-actions,
+  .desktop-modal-header {
+    display: none !important;
+  }
+
+  .mobile-modal-header {
+    display: flex !important;
+    align-items: center;
+    padding: 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--glass-border);
+    z-index: 100;
+    gap: 12px;
+  }
+
+  .form-card,
+  .form-surface {
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .form-layout-wrapper {
+    padding: 0 !important;
+  }
+
+  /* 7. Mobilde Taşmaları (Width) Önleme ve Sabit Butonları Serbest Bırakma */
+  .tabs-navigation-wrapper {
+    margin: 0 !important;
+    padding: 0 16px !important;
+  }
+
+  /* Header Actions (Right Content) Buttons on Mobile */
+  .tabs-right-content {
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  .tabs-right-content > div {
+    flex-direction: row !important;
+    flex-wrap: wrap !important;
+    width: 100%;
+    gap: 12px !important;
+    justify-content: flex-end !important;
+  }
+
+  .tabs-right-content button.btn,
+  .tabs-right-content button.btn-icon {
+    flex: 0 1 auto !important;
+    width: auto !important;
+    max-width: 100% !important;
+    height: 52px !important;
+    justify-content: center !important;
+  }
+
+  .modal-backdrop-only,
+  .modal-wrapper > .surface-card {
+    overflow-y: auto !important; /* Modal içeriğinin ana modal üzerinde kaymasını sağla */
+    overflow-x: hidden !important;
+  }
+
+  .form-layout-wrapper,
+  .form-card,
+  .form-surface {
+    height: auto !important;
+    min-height: 100% !important;
+    display: flex;
+    flex-direction: column;
+    flex: none !important; /* Konteyner yüksekliğine hapsolmasını engeller, içerik kadar uzar */
+    overflow: visible !important; /* form-card'ın varsayılan hidden'ını ezer */
+  }
+
+  .form-detail {
+    overflow-y: visible !important; /* Kendi içinde scroll olmasın, sayfa büyüsün */
+    flex: none !important; /* Form detayı içeriği kadar yer kaplasın, esnemesin */
+  }
+
+  .form-footer {
+    position: static !important;
+    margin-top: 24px !important; /* Otomatik itmeyi iptal et, içeriğin hemen altına sabitle */
+  }
+
+  /* 8. BaseCardPageHeader ve Liste Başlık Aksiyonları Mobilde Sarma */
+  .base-card-page-header,
+  .base-list-page .base-card-page-header {
+    flex-wrap: wrap !important;
+    gap: 12px !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+  }
+
+  .base-card-header-actions,
+  .base-list-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+}
+
+/* Z Fold 5 Dar (Katlanmış) Ekranlar ve Küçük Telefonlar */
+@media (max-width: 480px) {
+  .tabs-right-content > div {
+    flex-direction: column !important;
+  }
+
+  .tabs-right-content button.btn,
+  .tabs-right-content button.btn-icon {
+    width: 100% !important;
+  }
+
+  .base-card-header-actions,
+  .base-list-header-actions {
+    width: 100% !important;
+    justify-content: flex-end !important;
+  }
+
+  .base-list-page .base-card-page-header {
+    padding: 12px 14px !important;
+  }
+}

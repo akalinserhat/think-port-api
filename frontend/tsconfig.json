@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@akalin/ui": ["./vendor/akalin-ui/src/index.ts"],
+      "@akalin/module_core": ["./vendor/akalin-module-core/src/index.ts"],
+      "@akalin/module-core": ["./vendor/akalin-module-core/src/index.ts"],
+      "@akalin/email_module": ["./node_modules/@akalin/email_module/src/index.ts"],
+      "@akalin/email-module": ["./node_modules/@akalin/email_module/src/index.ts"],
+      "@akalin/global_search_module": ["./node_modules/@akalin/global_search_module/src/index.ts"],
+      "@akalin/global-search-module": ["./node_modules/@akalin/global_search_module/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway_secret_password
+      POSTGRES_DB: ai_browser_gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+
+  api-gateway:
+    build:
+      context: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway_secret_password@postgres:5432/ai_browser_gateway
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  browser-worker:
+    build:
+      context: ./backend
+    command: python -m worker.worker
+    shm_size: "2gb" # Headless Chromium çökmemesi için kritik paylaşımlı bellek alanı
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway_secret_password@postgres:5432/ai_browser_gateway
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+      - postgres
+
+volumes:
+  pgdata:

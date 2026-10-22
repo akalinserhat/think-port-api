@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ThinkPort API — MD3 Admin & AI Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-md-surface text-md-on-surface antialiased selection:bg-md-primary-container selection:text-md-on-primary-container">
+    <div id="root"></div>
+    <script>
+      window.addEventListener('error', function (event) {
+        try {
+          fetch('/admin/logs/client-error', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: 'EARLY_WINDOW_ERROR',
+              message: event.message || String(event.error || 'Unknown script error'),
+              stack: (event.error && event.error.stack) || (event.filename ? event.filename + ':' + event.lineno + ':' + event.colno : ''),
+              href: window.location.href,
+              ts: new Date().toISOString(),
+            }),
+          }).catch(function () {});
+        } catch (e) {}
+      }, true);
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
