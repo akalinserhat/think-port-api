@@ -15,7 +15,12 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "types": ["node"],
     "paths": {
+      "@akalin/ai-assistants": ["./node_modules/@akalin/ai-assistants/src/index.ts"],
+      "@akalin/ai_assistants": ["./node_modules/@akalin/ai-assistants/src/index.ts"],
       "@akalin/ui": ["./node_modules/@akalin/ui/src/index.ts"],
       "@akalin/module_core": ["./node_modules/@akalin/module_core/src/index.ts"],
       "@akalin/module-core": ["./node_modules/@akalin/module_core/src/index.ts"],
@@ -25,5 +30,5 @@
       "@akalin/global-search-module": ["./node_modules/@akalin/global_search_module/src/index.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

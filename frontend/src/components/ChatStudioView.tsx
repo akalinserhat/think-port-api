@@ -386,7 +386,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           is_archived: false,
           total_messages: 0,
           total_tokens: 0,
-          attachment_count: 0,
+          system_prompt: '',
           attachment_names: [],
           last_message_preview: '',
           created_at: new Date().toISOString(),
@@ -1500,7 +1500,15 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         }
         onTitleEdit={
           activeChatSessionId
-            ? (newTitle) => handleChatRenameSession(activeChatSessionId, newTitle)
+            ? async (newTitle?: string) => {
+                const titleToSet =
+                  typeof newTitle === 'string' && newTitle.trim()
+                    ? newTitle.trim()
+                    : window.prompt('Oturum başlığını düzenleyin:', activeSessionObj?.title || '');
+                if (titleToSet && titleToSet.trim()) {
+                  await handleChatRenameSession(activeChatSessionId, titleToSet.trim());
+                }
+              }
             : undefined
         }
         icon={<Sparkles size={22} />}
