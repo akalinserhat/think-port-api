@@ -347,6 +347,9 @@ class MessageFormatterService:
         if target_msg is None:
             return "", [], system_prompt
 
+        if target_msg.content is None:
+            return "", [], system_prompt
+
         if isinstance(target_msg.content, str):
             return target_msg.content.strip(), [], system_prompt
 
@@ -395,8 +398,9 @@ class MessageFormatterService:
     def estimate_prompt_tokens(messages: List[ChatMessageDTO]) -> int:
         """Mesaj listesindeki toplam istem (prompt) token sayısını tahmin eder."""
         serialized = "\n".join(
-            m.content if isinstance(m.content, str) else json.dumps(m.content)
+            (m.content if isinstance(m.content, str) else json.dumps(m.content))
             for m in messages
+            if m.content is not None
         )
         return DocumentService.estimate_tokens(serialized)
 
@@ -405,17 +409,32 @@ class MessageFormatterService:
         message: ChatMessageDTO,
     ) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Tek bir ChatMessageDTO nesnesini multimodal ve düz metin sözlüklerine dönüştürür."""
+        base_dict: Dict[str, Any] = {"role": message.role}
+        if message.tool_calls is not None:
+            base_dict["tool_calls"] = message.tool_calls
+        if message.tool_call_id is not None:
+            base_dict["tool_call_id"] = message.tool_call_id
+        if message.name is not None:
+            base_dict["name"] = message.name
+
+        if message.content is None:
+            base_dict["content"] = None
+            return base_dict, base_dict
+
         if isinstance(message.content, str):
-            simple = {"role": message.role, "content": message.content}
-            return simple, simple
+            base_dict["content"] = message.content
+            return base_dict, base_dict
 
         text_segments, image_parts = self._extract_segments_from_parts(message.content)
         combined_text = "\n\n".join(text_segments).strip() or "Ekli içeriği incele."
-        text_entry = {"role": message.role, "content": combined_text}
+        text_entry = dict(base_dict)
+        text_entry["content"] = combined_text
 
         if image_parts:
             mm_content: List[Dict[str, Any]] = [{"type": "text", "text": combined_text}] + image_parts
-            return {"role": message.role, "content": mm_content}, text_entry
+            mm_entry = dict(base_dict)
+            mm_entry["content"] = mm_content
+            return mm_entry, text_entry
 
         return text_entry, text_entry
 

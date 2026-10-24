@@ -978,6 +978,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: /^@akalin\/ai[-_]assistants$/,
+        replacement: path.resolve(__dirname, 'node_modules/@akalin/ai-assistants/src/index.ts'),
+      },
+      {
         find: /^@akalin\/ui$/,
         replacement: path.resolve(__dirname, 'node_modules/@akalin/ui/src/index.ts'),
       },
@@ -1008,6 +1012,7 @@ export default defineConfig({
   optimizeDeps: {
     force: true,
     exclude: [
+      '@akalin/ai-assistants',
       '@akalin/ui',
       '@akalin/module_core',
       '@akalin/module-core',

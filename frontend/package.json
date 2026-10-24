@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@akalin/ai-assistants": "github:akalinserhat/akalin-ai-assistants#main",
     "@akalin/email_module": "github:akalinserhat/akalin-email-module#main",
     "@akalin/global_search_module": "github:akalinserhat/akalin-global-search-module#main",
     "@akalin/module_core": "github:akalinserhat/akalin-module-core#main",

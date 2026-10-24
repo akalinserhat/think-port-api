@@ -20,16 +20,18 @@ import {
 } from 'lucide-react';
 import {
   BaseListPage,
-  BaseChatPage,
   BasePopup,
   type DataTableColumn,
   type ActionMenuItem,
+} from '@akalin/ui';
+import {
+  BaseChatPage,
   type ChatSession,
   type ChatMessage,
   type ChatAgent,
   type ChatAttachment,
   type PromptSuggestion,
-} from '@akalin/ui';
+} from '@akalin/ai-assistants';
 import {
   AIModelDTO,
   ApiKeyRecordDTO,

@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import AsyncGenerator, Callable, Dict, Any, List, Optional, Tuple
+from typing import AsyncGenerator, Callable, Dict, Any, List, Optional, Tuple, Union
 from app.core.config import settings
 from app.core.exceptions import gateway_timeout_error
 from app.core.logger import gateway_logger
@@ -96,18 +96,30 @@ class ChatService:
             initial_title=initial_title,
         )
 
+        last_msg = request.messages[-1] if request.messages else None
+        if last_msg and last_msg.role == "tool":
+            incoming_role = "tool"
+            tool_content = str(last_msg.content or "")
+            tool_name = last_msg.name or "tool"
+            incoming_content = f"[{tool_name}]: {tool_content}" if tool_content else f"[{tool_name}]"
+            auto_title = False
+        else:
+            incoming_role = "user"
+            incoming_content = clean_user_text
+            auto_title = True
+
         saved_user_msg = self._conversation_repo.append_message(
             conversation_id=conversation.id,
             user_id=user_ctx.user_id,
-            role="user",
+            role=incoming_role,
             model_id=normalized_model,
-            content=clean_user_text,
+            content=incoming_content,
             request_id=job_id,
             provider=provider,
-            attachments=attachments,
+            attachments=attachments if incoming_role == "user" else None,
             prompt_tokens=prompt_tokens,
             completion_tokens=0,
-            auto_update_title=True,
+            auto_update_title=auto_title,
         )
 
         self._channel_repo.create_channel(job_id)
@@ -121,6 +133,8 @@ class ChatService:
             model=normalized_model,
             requested_model=request.model,
             messages=request.messages,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
             prompt_tokens=prompt_tokens,
             response_format=normalized_rf,
             temperature=request.temperature,
@@ -129,6 +143,7 @@ class ChatService:
         gateway_logger.info(
             f"CHAT_START | id={job_id} | conv={conversation.id} | user={user_ctx.user_id} "
             f"| requested_model={request.model} | resolved_model={normalized_model} "
+            f"| tools={bool(request.tools)} "
             f"| json_mode={self._formatter.is_json_mode_requested(normalized_rf)} "
             f"| files={[a.file_name for a in attachments]} | stream={request.stream}"
         )
@@ -137,11 +152,12 @@ class ChatService:
 
     async def build_sync_response(self, job: ChatJobDTO) -> ChatCompletionResponseDTO:
         """Kanaldan tüm yanıt parçalarını toplar, JSON modundaysa ayıklar ve OpenAI senkron yanıt DTO'su oluşturur."""
-        full_content, completion_tokens, _, _ = await self._collect_full_response(job)
-        if self._formatter.is_json_mode_requested(job.response_format):
+        full_content, completion_tokens, _, _, tool_calls = await self._collect_full_response(job)
+        if self._formatter.is_json_mode_requested(job.response_format) and full_content:
             full_content = self._formatter.extract_and_normalize_json_content(full_content)
             completion_tokens = DocumentService.estimate_tokens(full_content)
 
+        finish_reason = "tool_calls" if tool_calls else "stop"
         return ChatCompletionResponseDTO(
             id=job.job_id,
             model=job.model,
@@ -149,8 +165,12 @@ class ChatService:
             choices=[
                 ChatCompletionChoiceDTO(
                     index=0,
-                    message=ChatMessageDTO(role="assistant", content=full_content),
-                    finish_reason="stop",
+                    message=ChatMessageDTO(
+                        role="assistant",
+                        content=full_content if full_content else None,
+                        tool_calls=tool_calls,
+                    ),
+                    finish_reason=finish_reason,
                 )
             ],
             usage=CompletionUsageDTO(
@@ -210,6 +230,15 @@ class ChatService:
                         DeltaMessageDTO(content=delta_text),
                         conversation_id=job.conversation_id,
                     )
+                elif payload["event"] == "tool_calls":
+                    yield self._format_sse_chunk(
+                        job.job_id,
+                        created_ts,
+                        job.model,
+                        DeltaMessageDTO(tool_calls=payload.get("tool_calls")),
+                        finish_reason="tool_calls",
+                        conversation_id=job.conversation_id,
+                    )
                 elif payload["event"] == "done":
                     finish_reason = "error" if status in ("error", "timeout") and not collected_chunks else "stop"
                     yield self._format_sse_chunk(
@@ -251,10 +280,13 @@ class ChatService:
                 session_id=used_session,
             )
 
-    async def _collect_full_response(self, job: ChatJobDTO) -> Tuple[str, int, str, int]:
-        """Senkron istekler için kanaldaki tüm delta parçalarını üst zaman aşımı kontrolüyle birleştirir."""
+    async def _collect_full_response(
+        self, job: ChatJobDTO
+    ) -> Tuple[str, int, str, int, Optional[List[Dict[str, Any]]]]:
+        """Senkron istekler için kanaldaki tüm delta parçalarını ve tool_calls olaylarını birleştirir."""
         channel = self._channel_repo.get_channel(job.job_id)
         collected: List[str] = []
+        collected_tool_calls: List[Dict[str, Any]] = []
         start_time = time.perf_counter()
         deadline = start_time + float(settings.web_gateway_timeout_sec)
         ttft_ms = 0
@@ -282,6 +314,9 @@ class ChatService:
                         if ttft_ms == 0:
                             ttft_ms = int((time.perf_counter() - start_time) * 1000)
                         collected.append(payload["text"])
+                    elif payload["event"] == "tool_calls":
+                        if payload.get("tool_calls"):
+                            collected_tool_calls.extend(payload["tool_calls"])
                     elif payload["event"] == "done":
                         break
         except asyncio.TimeoutError:
@@ -298,6 +333,13 @@ class ChatService:
             if self._formatter.is_json_mode_requested(job.response_format) and full_text and status == "success":
                 full_text = self._formatter.extract_and_normalize_json_content(full_text)
             comp_tokens = DocumentService.estimate_tokens(full_text)
+            preview_text = full_text
+            if not preview_text and collected_tool_calls:
+                call_names = ", ".join(
+                    tc.get("function", {}).get("name", "tool") for tc in collected_tool_calls
+                )
+                preview_text = f"[Araç Çağrısı: {call_names}]"
+
             latency_ms = self._finalize_job(
                 job=job,
                 completion_tokens=comp_tokens,
@@ -306,18 +348,18 @@ class ChatService:
                 ttft_ms=ttft_ms,
                 status=status,
                 upstream_provider=upstream_provider,
-                response_preview=full_text,
+                response_preview=preview_text,
                 error_detail=error_detail,
                 session_id=used_session,
             )
 
-        if status == "timeout" or (status == "error" and not full_text):
+        if status == "timeout" or (status == "error" and not full_text and not collected_tool_calls):
             raise gateway_timeout_error(
                 message=error_detail
                 or f"Model '{job.requested_model or job.model}' ({job.model}) alt sağlayıcısından sürede yanıt alınamadı."
             )
 
-        return full_text, comp_tokens, used_session, latency_ms
+        return full_text, comp_tokens, used_session, latency_ms, (collected_tool_calls or None)
 
     def _finalize_job(
         self,
@@ -418,6 +460,8 @@ class ChatService:
                     session.id,
                     response_format=job.response_format,
                     temperature=job.temperature,
+                    tools=job.tools,
+                    tool_choice=job.tool_choice,
                 )
             else:
                 upstream_name = f"ollama-local ({job.model})"
@@ -429,6 +473,8 @@ class ChatService:
                     session.id,
                     response_format=job.response_format,
                     temperature=job.temperature,
+                    tools=job.tools,
+                    tool_choice=job.tool_choice,
                 )
 
             success = await asyncio.wait_for(
@@ -551,29 +597,38 @@ class ChatService:
         session_id: str,
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Web AI sağlayıcısını çalıştırır; ulaşılamazsa yerel Ollama yedek modeline düşer."""
-        callback = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         web_model_name = web_def.web_model or "openai-fast"
 
         success = await asyncio.to_thread(
             self._llm_provider.stream_from_pollinations_web,
             web_model_name,
             prepared.multimodal_messages,
-            callback,
+            delta_cb,
             web_def.id,
             response_format,
             temperature,
+            tools,
+            tool_choice,
+            tools_cb,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
                 self._llm_provider.stream_from_pollinations_web,
                 web_model_name,
                 prepared.text_only_messages,
-                callback,
+                delta_cb,
                 web_def.id,
                 response_format,
                 temperature,
+                tools,
+                tool_choice,
+                tools_cb,
             )
         if success:
             return True
@@ -587,9 +642,12 @@ class ChatService:
                 self._llm_provider.stream_from_ollama,
                 fallback_local,
                 prepared.text_only_messages,
-                callback,
+                delta_cb,
                 response_format,
                 temperature,
+                tools,
+                tool_choice,
+                tools_cb,
             )
         return False
 
@@ -602,25 +660,34 @@ class ChatService:
         session_id: str,
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> bool:
         """Yerel Ollama modelinden akış alır; Ollama kapalıysa otomatik olarak Web AI köprüsünü kullanır."""
-        callback = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         success = await asyncio.to_thread(
             self._llm_provider.stream_from_ollama,
             model_id,
             prepared.multimodal_messages,
-            callback,
+            delta_cb,
             response_format,
             temperature,
+            tools,
+            tool_choice,
+            tools_cb,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
                 self._llm_provider.stream_from_ollama,
                 model_id,
                 prepared.text_only_messages,
-                callback,
+                delta_cb,
                 response_format,
                 temperature,
+                tools,
+                tool_choice,
+                tools_cb,
             )
         if success:
             return True
@@ -629,10 +696,13 @@ class ChatService:
             self._llm_provider.stream_from_pollinations_web,
             "openai-fast",
             prepared.text_only_messages,
-            callback,
+            delta_cb,
             model_id,
             response_format,
             temperature,
+            tools,
+            tool_choice,
+            tools_cb,
         )
 
     @staticmethod
@@ -649,6 +719,21 @@ class ChatService:
             ).result(timeout=10)
 
         return _on_delta
+
+    @staticmethod
+    def _create_threadsafe_tool_calls_callback(
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+    ) -> Callable[[List[Dict[str, Any]]], None]:
+        """Senkron HTTP okuma iş parçacığından asyncio kuyruğuna güvenli tool_calls gönderen callback döner."""
+        def _on_tool_calls(tool_calls: List[Dict[str, Any]]) -> None:
+            asyncio.run_coroutine_threadsafe(
+                channel.put({"event": "tool_calls", "tool_calls": tool_calls, "session_id": session_id}),
+                loop,
+            ).result(timeout=10)
+
+        return _on_tool_calls
 
     @staticmethod
     def _format_sse_chunk(

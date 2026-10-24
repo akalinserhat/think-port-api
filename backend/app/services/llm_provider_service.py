@@ -22,6 +22,9 @@ class LlmProviderService:
         on_delta: Callable[[str], None],
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> bool:
         """Yerel Ollama /v1/chat/completions uç noktasından gerçek zamanlı SSE akışı okur."""
         t0 = time.perf_counter()
@@ -36,6 +39,8 @@ class LlmProviderService:
                 openai_messages,
                 response_format=response_format,
                 temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
             )
             conn.request(
                 "POST",
@@ -54,6 +59,7 @@ class LlmProviderService:
                 self._extract_ollama_delta,
                 on_delta,
                 max_duration_sec=float(settings.ollama_timeout_sec),
+                on_tool_calls=on_tool_calls,
             )
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
@@ -74,6 +80,9 @@ class LlmProviderService:
         requested_model_id: str = "",
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> bool:
         """
         Web AI sağlayıcısından (text.pollinations.ai/openai) gerçek zamanlı SSE akışı okur.
@@ -98,6 +107,9 @@ class LlmProviderService:
             requested_model_id,
             response_format=response_format,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            on_tool_calls=on_tool_calls,
         ):
             return True
 
@@ -117,6 +129,9 @@ class LlmProviderService:
         requested_model_id: str = "",
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> bool:
         """text.pollinations.ai/openai uç noktasından chunked-safe SSE veya JSON yanıtı okur."""
         t0 = time.perf_counter()
@@ -134,6 +149,8 @@ class LlmProviderService:
                 reasoning_effort="high" if requested_model_id == "deepseek-r1" else "low",
                 response_format=response_format,
                 temperature=temperature,
+                tools=tools,
+                tool_choice=tool_choice,
             )
             conn.request(
                 "POST",
@@ -156,6 +173,7 @@ class LlmProviderService:
                 self._extract_web_delta,
                 on_delta,
                 max_duration_sec=float(settings.web_gateway_timeout_sec),
+                on_tool_calls=on_tool_calls,
             )
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
@@ -308,13 +326,19 @@ class LlmProviderService:
         reasoning_effort: Optional[str] = None,
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
     ) -> bytes:
-        """OpenAI uyumlu streaming istek gövdesini JSON bytes olarak hazırlar."""
+        """OpenAI uyumlu istek gövdesini JSON bytes olarak hazırlar. tools varsa senkron JSON (stream: False) modunda çalışır."""
         body: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "stream": True,
+            "stream": False if tools else True,
         }
+        if tools:
+            body["tools"] = tools
+            if tool_choice:
+                body["tool_choice"] = tool_choice
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         if temperature is not None:
@@ -330,11 +354,13 @@ class LlmProviderService:
         delta_extractor: Callable[[Dict[str, Any]], str],
         on_delta: Callable[[str], None],
         max_duration_sec: float = 90.0,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> bool:
         """
         HTTP yanıtını 'resp.readline()' üzerinden (HTTP chunked transfer encoding
         kod çözümü uygulanmış şekilde) satır satır okur ve her delta parçasını iletir.
         Eğer model yalnızca reasoning alanı döndürürse onu da yedek olarak yakalar.
+        Model tool_calls üretmişse on_tool_calls geri çağırımını tetikler.
         Üst zaman aşımı (`max_duration_sec`) aşıldığında akışı sonlandırır.
         """
         t_start = time.perf_counter()
@@ -363,12 +389,16 @@ class LlmProviderService:
                     break
                 try:
                     chunk = json.loads(data_str)
+                    delta_obj = chunk.get("choices", [{}])[0].get("delta", {})
+                    tc = delta_obj.get("tool_calls")
+                    if tc and on_tool_calls:
+                        on_tool_calls(tc)
+                        received_content = True
                     content = delta_extractor(chunk)
                     if content:
                         received_content = True
                         on_delta(content)
                     else:
-                        delta_obj = chunk.get("choices", [{}])[0].get("delta", {})
                         reasoning_piece = delta_obj.get("reasoning") or delta_obj.get("reasoning_content")
                         if reasoning_piece:
                             reasoning_buffer.append(reasoning_piece)
@@ -388,8 +418,16 @@ class LlmProviderService:
             joined = "\n".join(non_sse_lines).strip()
             try:
                 parsed = json.loads(joined)
+                choice = parsed.get("choices", [{}])[0]
+                tool_calls = (
+                    choice.get("message", {}).get("tool_calls")
+                    or choice.get("delta", {}).get("tool_calls")
+                )
+                if tool_calls and on_tool_calls:
+                    on_tool_calls(tool_calls)
+                    return True
                 msg_content = (
-                    parsed.get("choices", [{}])[0].get("message", {}).get("content")
+                    choice.get("message", {}).get("content")
                     or delta_extractor(parsed)
                 )
                 if msg_content:

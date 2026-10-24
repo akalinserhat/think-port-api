@@ -32,8 +32,10 @@ class ChatMessageDTO(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     role: Literal["system", "user", "assistant", "developer", "tool"]
-    content: Union[str, List[Dict[str, Any]]]
+    content: Optional[Union[str, List[Dict[str, Any]]]] = ""
     name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
 
 class ChatCompletionRequestDTO(BaseModel):
@@ -43,6 +45,8 @@ class ChatCompletionRequestDTO(BaseModel):
 
     model: str = Field(..., examples=["gpt-4o", "claude-3-5-sonnet", "deepseek-r1"])
     messages: List[ChatMessageDTO]
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     stream: Optional[bool] = False
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=1.0, ge=0.0, le=1.0)
@@ -85,7 +89,7 @@ class ChatCompletionChoiceDTO(BaseModel):
 
     index: int = 0
     message: ChatMessageDTO
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "error"]] = "stop"
+    finish_reason: Optional[Literal["stop", "length", "content_filter", "tool_calls", "error"]] = "stop"
 
 
 class ChatCompletionResponseDTO(BaseModel):
@@ -106,6 +110,7 @@ class DeltaMessageDTO(BaseModel):
 
     role: Optional[Literal["assistant"]] = None
     content: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 class ChatCompletionChunkChoiceDTO(BaseModel):
@@ -113,7 +118,7 @@ class ChatCompletionChunkChoiceDTO(BaseModel):
 
     index: int = 0
     delta: DeltaMessageDTO
-    finish_reason: Optional[Literal["stop", "length", "error"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "error"]] = None
 
 
 class ChatCompletionChunkDTO(BaseModel):
@@ -132,7 +137,7 @@ class PreparedMessagesDTO(BaseModel):
     """AI motoruna gönderilmek üzere ayrıştırılmış mesaj formatları DTO'su."""
 
     multimodal_messages: List[Dict[str, Any]]
-    text_only_messages: List[Dict[str, str]]
+    text_only_messages: List[Dict[str, Any]]
     has_multimodal: bool
     is_json_mode: bool = False
     system_instructions: str = ""
@@ -150,6 +155,8 @@ class ChatJobDTO(BaseModel):
     model: str
     requested_model: Optional[str] = None
     messages: List[ChatMessageDTO]
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     prompt_tokens: int
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = 0.7
@@ -159,6 +166,7 @@ class ChatJobDTO(BaseModel):
 class StreamEventDTO(BaseModel):
     """Asenkron yayın kuyruğundaki tek bir olayı temsil eden DTO."""
 
-    event: Literal["delta", "done", "error"]
+    event: Literal["delta", "done", "error", "tool_calls"]
     text: str = ""
     session_id: str = "sess-gpt-01"
+    tool_calls: Optional[List[Dict[str, Any]]] = None
