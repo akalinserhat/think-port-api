@@ -16,9 +16,9 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@akalin/ui": ["./vendor/akalin-ui/src/index.ts"],
-      "@akalin/module_core": ["./vendor/akalin-module-core/src/index.ts"],
-      "@akalin/module-core": ["./vendor/akalin-module-core/src/index.ts"],
+      "@akalin/ui": ["./node_modules/@akalin/ui/src/index.ts"],
+      "@akalin/module_core": ["./node_modules/@akalin/module_core/src/index.ts"],
+      "@akalin/module-core": ["./node_modules/@akalin/module_core/src/index.ts"],
       "@akalin/email_module": ["./node_modules/@akalin/email_module/src/index.ts"],
       "@akalin/email-module": ["./node_modules/@akalin/email_module/src/index.ts"],
       "@akalin/global_search_module": ["./node_modules/@akalin/global_search_module/src/index.ts"],

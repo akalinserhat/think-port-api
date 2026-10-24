@@ -95,13 +95,21 @@ function optionalPeerStubPlugin(): Plugin {
   return {
     name: 'akalin-ui-optional-peer-stubs',
     resolveId(id) {
-      if (OPTIONAL_PEER_STUBS.has(id)) {
+      if (OPTIONAL_PEER_STUBS.has(id) || id.startsWith('@modules/')) {
         return `\0virtual:${id}`;
       }
       return null;
     },
     load(id) {
       if (id.startsWith('\0virtual:')) {
+        if (id.includes('@modules/')) {
+          return `
+            export const CariSeciciList = () => null;
+            export const UrunSeciciList = () => null;
+            export const SiparisSeciciList = () => null;
+            export default () => null;
+          `;
+        }
         return `
           export const Capacitor = { isNativePlatform: () => false, getPlatform: () => 'web' };
           export const BarcodeScanner = {};
@@ -971,11 +979,11 @@ export default defineConfig({
     alias: [
       {
         find: /^@akalin\/ui$/,
-        replacement: path.resolve(__dirname, 'vendor/akalin-ui/src/index.ts'),
+        replacement: path.resolve(__dirname, 'node_modules/@akalin/ui/src/index.ts'),
       },
       {
         find: /^@akalin\/module[-_]core$/,
-        replacement: path.resolve(__dirname, 'vendor/akalin-module-core/src/index.ts'),
+        replacement: path.resolve(__dirname, 'node_modules/@akalin/module_core/src/index.ts'),
       },
       {
         find: /^@akalin\/email[-_]module$/,
