@@ -1,7 +1,13 @@
+"""
+ThinkPort AI Gateway - SQLite Komut Satırı Veritabanı Köprüsü (sqlite_cli_bridge).
+Sohbet oturumları, mesajlar, ekli belgeler, kullanıcılar ve API anahtarları için
+SQLite işlemlerini izole süreç üzerinden yürütür.
+"""
 from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -88,9 +94,14 @@ def list_conversations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         str(payload.get("authorization") or ""),
         str(payload.get("x_user_id") or ""),
     )
+    is_deleted = 1 if str(payload.get("is_deleted") or "").lower() in ("true", "1") else 0
     is_archived = 1 if str(payload.get("is_archived") or "").lower() in ("true", "1") else 0
-    clauses = ["c.is_archived = ?"]
-    params: List[Any] = [is_archived]
+    if is_deleted:
+        clauses = ["COALESCE(c.is_deleted, 0) = 1"]
+        params: List[Any] = []
+    else:
+        clauses = ["COALESCE(c.is_deleted, 0) = 0", "c.is_archived = ?"]
+        params = [is_archived]
 
     effective_user_id = payload.get("user_id") if is_admin else requester_id
     if effective_user_id:
@@ -161,6 +172,7 @@ def list_conversations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             SELECT
                 c.id, c.user_id, c.title, c.model_id, c.system_prompt,
                 c.source, c.is_pinned, c.is_archived,
+                COALESCE(c.is_deleted, 0) AS is_deleted,
                 c.total_messages, c.total_tokens, c.created_at, c.updated_at,
                 COALESCE(u.email, c.user_id) AS user_email,
                 COALESCE(u.full_name, c.user_id) AS user_full_name,
@@ -197,6 +209,7 @@ def list_conversations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "source": "api" if r["source"] == "api" else "studio",
                 "is_pinned": bool(r["is_pinned"]),
                 "is_archived": bool(r["is_archived"]),
+                "is_deleted": bool(r["is_deleted"]),
                 "total_messages": r["total_messages"],
                 "total_tokens": r["total_tokens"],
                 "attachment_names": att_map.get(cid, []),
@@ -206,6 +219,234 @@ def list_conversations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def _strip_ui_trace_blocks(text: str) -> str:
+    if not text or not isinstance(text, str):
+        return text or ""
+    cleaned = text
+    if "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" in cleaned:
+        cleaned = cleaned.split("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", 1)[0].rstrip()
+    cleaned = re.sub(
+        r"^> 🧠 \*\*LLM Düşünce[^\n]*\n(?:```text\n[\s\S]*?\n```|> [^\n]*)\n\n",
+        "",
+        cleaned,
+    )
+    if "\n\n---\n📥 **Gelen LLM İletişim Raporu:**" in cleaned:
+        cleaned = cleaned.split("\n\n---\n📥 **Gelen LLM İletişim Raporu:**", 1)[0].rstrip()
+    if "\n\n📥 **Gelen LLM İletişim Raporu:**" in cleaned:
+        cleaned = cleaned.split("\n\n📥 **Gelen LLM İletişim Raporu:**", 1)[0].rstrip()
+    if "\n\n---\n📡 **Canlı LLM Akışı" in cleaned:
+        cleaned = cleaned.split("\n\n---\n📡 **Canlı LLM Akışı", 1)[0].rstrip()
+    if "\n\n---\n📄 **LLM'e Aktarılan Ekli Belge İçeriği" in cleaned:
+        cleaned = cleaned.split("\n\n---\n📄 **LLM'e Aktarılan Ekli Belge İçeriği", 1)[0].rstrip()
+    if "\n\n📄 **LLM'e Aktarılan Ekli Belge İçeriği" in cleaned:
+        cleaned = cleaned.split("\n\n📄 **LLM'e Aktarılan Ekli Belge İçeriği", 1)[0].rstrip()
+    return cleaned
+
+
+def _expand_tool_calls_for_display(tool_calls: List[Any]) -> List[Any]:
+    expanded: List[Any] = []
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            expanded.append(tc)
+            continue
+        tc_copy = dict(tc)
+        fn = tc_copy.get("function")
+        if isinstance(fn, dict):
+            fn_copy = dict(fn)
+            raw_args = fn_copy.get("arguments")
+            if isinstance(raw_args, str) and raw_args.strip():
+                try:
+                    fn_copy["arguments"] = json.loads(raw_args)
+                except Exception:
+                    repaired_args = re.sub(
+                        r'("[^"\\]*(?:\\.[^"\\]*)*")\s*\]\s*(?=,\s*"[^"]+"\s*:)',
+                        r"\1",
+                        raw_args,
+                    )
+                    repaired_args = re.sub(
+                        r'\}\s*\]\s*,\s*(?="(?:kodu|kod|adi|ad|kampanyaKodu|kuralAlani)"\s*:)',
+                        "}]},{",
+                        repaired_args,
+                    )
+                    try:
+                        fn_copy["arguments"] = json.loads(repaired_args)
+                    except Exception:
+                        pass
+            tc_copy["function"] = fn_copy
+        expanded.append(tc_copy)
+    return expanded
+
+
+def _format_message_for_studio_display(
+    msg: Dict[str, Any],
+    conversation_system_prompt: str = "",
+) -> str:
+    raw_content = str(msg.get("content") or "")
+    role = str(msg.get("role") or "user")
+    model_id = str(msg.get("model_id") or "")
+    provider = str(msg.get("provider") or "gateway")
+    request_id = str(msg.get("request_id") or "—")
+    prompt_tokens = int(msg.get("prompt_tokens") or 0)
+    completion_tokens = int(msg.get("completion_tokens") or 0)
+    total_tokens = int(msg.get("total_tokens") or (prompt_tokens + completion_tokens))
+    latency_ms = int(msg.get("latency_ms") or 0)
+    ttft_ms = int(msg.get("ttft_ms") or 0)
+    status = str(msg.get("status") or "success")
+    error_detail = str(msg.get("error_detail") or "")
+    thinking_col = str(msg.get("thinking_content") or "")
+    tool_calls_col = str(msg.get("tool_calls_json") or "")
+    raw_payload_col = str(msg.get("raw_payload_json") or "")
+
+    raw_payload: Dict[str, Any] = {}
+    if raw_payload_col.strip():
+        try:
+            parsed_p = json.loads(raw_payload_col)
+            if isinstance(parsed_p, dict):
+                raw_payload = parsed_p
+        except Exception:
+            raw_payload = {}
+
+    base_clean = _strip_ui_trace_blocks(raw_content)
+
+    if role != "assistant":
+        if role == "tool":
+            return f"🔧 [ARAÇ YANITI / TOOL EXECUTION RESULT]\n{base_clean}" if base_clean else "🔧 [ARAÇ YANITI / TOOL EXECUTION RESULT]"
+        return base_clean
+
+    if "📥 **Gelen LLM İletişim Raporu:**" in raw_content:
+        return raw_content
+
+    pattern = re.compile(r"<think(?:ing)?[^>]*>([\s\S]*?)</think(?:ing)?>", flags=re.IGNORECASE)
+    matches = pattern.findall(base_clean)
+    tag_thoughts = "\n\n".join(m.strip() for m in matches if m and m.strip())
+    clean_answer = pattern.sub("", base_clean).strip() if tag_thoughts else base_clean
+
+    parsed_tcs: List[Any] = []
+    if tool_calls_col.strip():
+        try:
+            tc_parsed = json.loads(tool_calls_col)
+            if isinstance(tc_parsed, list):
+                parsed_tcs = tc_parsed
+        except Exception:
+            pass
+    if not parsed_tcs and isinstance(raw_payload.get("tool_calls"), list):
+        parsed_tcs = raw_payload["tool_calls"]
+
+    expanded_tcs = _expand_tool_calls_for_display(parsed_tcs) if parsed_tcs else []
+    if expanded_tcs and clean_answer.lstrip().startswith("[Araç Çağrısı:"):
+        call_names = ", ".join(
+            tc.get("function", {}).get("name", "tool")
+            for tc in expanded_tcs
+            if isinstance(tc, dict)
+        )
+        pretty_tcs = json.dumps(expanded_tcs, ensure_ascii=False, indent=2)
+        clean_answer = f"🔧 **Tetiklenen Araç Çağrısı (`{call_names}`):**\n```json\n{pretty_tcs}\n```"
+
+    extracted_thought = str(raw_payload.get("thinking_content") or "").strip()
+    if not extracted_thought and thinking_col:
+        m = re.search(
+            r"🧠 \[LLM DÜŞÜNCE SÜRECİ[^\]]*\]\n([\s\S]*?)(?:\n---\n|$)",
+            thinking_col,
+        )
+        if m and m.group(1):
+            extracted_thought = m.group(1).strip()
+    if tag_thoughts and tag_thoughts not in extracted_thought:
+        extracted_thought = (
+            f"{extracted_thought}\n\n{tag_thoughts}".strip()
+            if extracted_thought
+            else tag_thoughts
+        )
+
+    sections: List[str] = []
+    if extracted_thought:
+        sections.append(
+            f"> 🧠 **LLM Düşünce & İçsel Muhakeme Süreci (Chain-of-Thought):**\n```text\n{extracted_thought}\n```"
+        )
+    else:
+        sections.append(
+            f"> 🧠 **LLM Düşünce & Karar Süreci:**\n> Model (`{model_id}` · `{provider}`) gelen istemi değerlendirerek **{ttft_ms or latency_ms} ms** içinde ilk token'ı üretti ve toplam **{latency_ms} ms** sürede **{len(clean_answer.encode('utf-8'))} bayt ({len(clean_answer)} karakter)** uzunluğunda yanıt döndürdü."
+        )
+
+    if len(clean_answer) > 0:
+        sections.append(clean_answer)
+    else:
+        sections.append("*(Boş metin yanıtı — 0 karakter)*")
+
+    if expanded_tcs and "```json" not in clean_answer:
+        sections.append(
+            f"🔧 **Tetiklenen Araç Çağrıları (`tool_calls` — {len(expanded_tcs)} adet):**\n```json\n{json.dumps(expanded_tcs, ensure_ascii=False, indent=2)}\n```"
+        )
+
+    raw_unfiltered = str(raw_payload.get("raw_unfiltered_output") or "")
+    if (
+        raw_unfiltered
+        and not raw_unfiltered.lstrip().startswith("[Araç Çağrısı:")
+        and raw_unfiltered.strip() != clean_answer.strip()
+        and raw_unfiltered.strip() != base_clean.strip()
+    ):
+        sections.append(
+            f"📦 **Modelin Ham (Filtrelenmemiş / Normalize Edilmemiş) Çıktısı ({len(raw_unfiltered)} krk):**\n```text\n{raw_unfiltered}\n```"
+        )
+
+    session_id = str(raw_payload.get("session_id") or "—")
+    stream_label = (
+        "Senkron JSON" if raw_payload.get("is_stream") is False else "SSE Gerçek Zamanlı Akış"
+    )
+    char_len = len(clean_answer)
+    byte_len = len(clean_answer.encode("utf-8"))
+    err_part = f"\n- **Hata Detayı:** `{error_detail}`" if error_detail else ""
+    response_type_desc = (
+        f"MCP Araç Çağrısı (`{', '.join(tc.get('function', {}).get('name', 'tool') for tc in expanded_tcs if isinstance(tc, dict))}`)"
+        if expanded_tcs
+        else "Metin / JSON Yanıtı"
+    )
+
+    incoming_report_payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "model": model_id,
+        "provider": provider,
+        "session_id": session_id,
+        "mode": stream_label,
+        "status": status,
+        "metrics": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "ttft_ms": ttft_ms,
+            "latency_ms": latency_ms,
+            "char_length": char_len,
+            "byte_length": byte_len,
+        },
+    }
+    if extracted_thought:
+        incoming_report_payload["thinking_content"] = extracted_thought
+    if raw_unfiltered and not raw_unfiltered.lstrip().startswith("[Araç Çağrısı:"):
+        try:
+            incoming_report_payload["raw_output"] = json.loads(raw_unfiltered)
+        except Exception:
+            incoming_report_payload["raw_output"] = raw_unfiltered
+    elif clean_answer and not clean_answer.lstrip().startswith(("🔧", "[Araç Çağrısı:")):
+        try:
+            incoming_report_payload["content"] = json.loads(clean_answer)
+        except Exception:
+            incoming_report_payload["content"] = clean_answer
+    if expanded_tcs:
+        incoming_report_payload["tool_calls"] = expanded_tcs
+    if error_detail:
+        incoming_report_payload["error_detail"] = error_detail
+
+    incoming_report_json = json.dumps(incoming_report_payload, ensure_ascii=False, indent=2)
+
+    sections.append(
+        f"📥 **Gelen LLM İletişim Raporu:**\n"
+        f"- **İstek & Oturum:** `İstek ID: {request_id}` · `Oturum: {session_id}` · `Sağlayıcı: {provider}` · `Mod: {stream_label}`\n"
+        f"- **Yanıt Türü & Boyut:** {response_type_desc} · `{char_len} krk ({byte_len} bayt)` · `Durum: {status}`\n"
+        f"- **Token & Performans:** `Girdi: {prompt_tokens} tok` · `Çıktı: {completion_tokens} tok` · `Toplam: {total_tokens} tok` · `TTFT: {ttft_ms} ms` · `Toplam Süre: {latency_ms} ms`{err_part}\n"
+        f"```json\n{incoming_report_json}\n```"
+    )
+    return "\n\n".join(sections)
 
 
 def get_detail(
@@ -220,6 +461,7 @@ def get_detail(
             SELECT
                 c.id, c.user_id, c.title, c.model_id, c.system_prompt,
                 c.source, c.is_pinned, c.is_archived,
+                COALESCE(c.is_deleted, 0) AS is_deleted,
                 c.total_messages, c.total_tokens, c.created_at, c.updated_at,
                 COALESCE(u.email, c.user_id) AS user_email,
                 COALESCE(u.full_name, c.user_id) AS user_full_name,
@@ -245,6 +487,9 @@ def get_detail(
             SELECT
                 m.id, m.conversation_id, m.request_id, m.user_id,
                 m.role, m.model_id, m.provider, m.content,
+                COALESCE(m.thinking_content, '') AS thinking_content,
+                COALESCE(m.tool_calls_json, '') AS tool_calls_json,
+                COALESCE(m.raw_payload_json, '') AS raw_payload_json,
                 m.prompt_tokens, m.completion_tokens, m.total_tokens,
                 m.latency_ms, m.ttft_ms, m.status, m.error_detail, m.created_at,
                 COALESCE(u.email, m.user_id) AS user_email,
@@ -272,10 +517,15 @@ def get_detail(
     for ar in att_rows:
         atts_by_msg.setdefault(ar["message_id"], []).append(dict(ar))
 
+    sys_prompt_str = row["system_prompt"] or ""
     messages: List[Dict[str, Any]] = []
     for mr in msg_rows:
         d = dict(mr)
         d["attachments"] = atts_by_msg.get(mr["id"], [])
+        d["content"] = _format_message_for_studio_display(
+            d,
+            conversation_system_prompt=sys_prompt_str,
+        )
         messages.append(d)
 
     prev = (row["last_message_preview"] or "").strip()
@@ -2247,6 +2497,13 @@ def main() -> None:
         if "is_archived" in b and b["is_archived"] is not None:
             fields.append("is_archived = ?")
             vals.append(1 if b["is_archived"] else 0)
+            if b["is_archived"] and b.get("is_deleted") is None:
+                fields.append("is_deleted = 0")
+        if "is_deleted" in b and b["is_deleted"] is not None:
+            fields.append("is_deleted = ?")
+            vals.append(1 if b["is_deleted"] else 0)
+            if not b["is_deleted"] and b.get("is_archived") is None:
+                fields.append("is_archived = 0")
         if fields:
             fields.append("updated_at = ?")
             vals.append(datetime.now(timezone.utc).isoformat())
@@ -2263,8 +2520,16 @@ def main() -> None:
         if not existing:
             print("null")
             return
+        permanent = str(req.get("permanent") or "").lower() in ("true", "1")
+        now_iso = datetime.now(timezone.utc).isoformat()
         with sqlite_db.connection() as conn:
-            conn.execute("DELETE FROM chat_conversations WHERE id = ?", (cid,))
+            if permanent:
+                conn.execute("DELETE FROM chat_conversations WHERE id = ?", (cid,))
+            else:
+                conn.execute(
+                    "UPDATE chat_conversations SET is_deleted = 1, is_pinned = 0, updated_at = ? WHERE id = ?",
+                    (now_iso, cid),
+                )
         print(json.dumps({"status": "deleted", "id": cid}))
     elif action == "record_turn":
         print(json.dumps(record_turn(req.get("payload") or {}), ensure_ascii=False))

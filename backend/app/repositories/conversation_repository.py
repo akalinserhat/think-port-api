@@ -1,6 +1,13 @@
+"""
+ThinkPort AI Gateway - Sohbet Oturumları Veri Erişim ve Anlık Olay Yayını Katmanı (conversation_repository.py).
+SQLite üzerindeki sohbet oturumları (chat_conversations), mesajlar (chat_messages) ve ekli dosyaların
+(chat_message_attachments) kalıcı yönetimini ve SSE abonelerine anlık değişiklik bildirimini sağlar.
+"""
+import asyncio
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from app.dtos.conversation_dto import (
     ConversationDetailDTO,
     ConversationMessageDTO,
@@ -10,6 +17,71 @@ from app.dtos.conversation_dto import (
     UpdateConversationRequestDTO,
 )
 from app.repositories.sqlite_db import sqlite_db
+
+
+class ConversationEventBroadcaster:
+    """
+    Sohbet oturumu ve mesaj değişikliklerini bağlı tüm SSE istemcilerine (AI Sohbet Stüdyosu listesi vb.)
+    iş parçacığı güvenli (thread-safe) şekilde anlık olarak yayınlayan bellek içi olay dağıtıcısı.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._revision: int = 0
+        self._subscribers: Set[Tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = set()
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
+
+    def subscribe(self) -> Tuple[asyncio.AbstractEventLoop, asyncio.Queue]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        entry = (loop, queue)
+        with self._lock:
+            self._subscribers.add(entry)
+        return entry
+
+    def unsubscribe(self, entry: Tuple[asyncio.AbstractEventLoop, asyncio.Queue]) -> None:
+        with self._lock:
+            self._subscribers.discard(entry)
+
+    def publish(self, action: str, conversation_id: str) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._revision += 1
+            rev = self._revision
+            subscribers = list(self._subscribers)
+
+        payload: Dict[str, Any] = {
+            "event": "conversation_updated",
+            "action": action,
+            "conversation_id": conversation_id,
+            "revision": rev,
+            "ts": now_iso,
+        }
+
+        def _put_nowait_safe(q: asyncio.Queue, item: Dict[str, Any]) -> None:
+            if q.full():
+                try:
+                    q.get_nowait()
+                except Exception:
+                    pass
+            try:
+                q.put_nowait(item)
+            except Exception:
+                pass
+
+        for loop, queue in subscribers:
+            try:
+                if loop.is_Running() if hasattr(loop, "is_Running") else loop.is_running():
+                    loop.call_soon_threadsafe(_put_nowait_safe, queue, payload)
+            except Exception:
+                pass
+
+
+conversation_event_broadcaster = ConversationEventBroadcaster()
 
 
 class ConversationRepository:
@@ -46,6 +118,7 @@ class ConversationRepository:
         summary = self.get_conversation_summary(conv_id)
         if not summary:
             raise RuntimeError("Sohbet oturumu oluşturulamadı.")
+        conversation_event_broadcaster.publish("created", conv_id)
         return summary
 
     def ensure_conversation(
@@ -61,6 +134,24 @@ class ConversationRepository:
         if conversation_id:
             existing = self.get_conversation_summary(conversation_id)
             if existing:
+                needs_update = False
+                new_source = existing.source
+                new_sys = existing.system_prompt
+                if source == "api" and existing.source != "api":
+                    new_source = "api"
+                    needs_update = True
+                if system_prompt and system_prompt.strip() and existing.system_prompt != system_prompt.strip():
+                    new_sys = system_prompt.strip()
+                    needs_update = True
+                if needs_update:
+                    with sqlite_db.connection() as conn:
+                        conn.execute(
+                            "UPDATE chat_conversations SET source = ?, system_prompt = ? WHERE id = ?",
+                            (new_source, new_sys, conversation_id),
+                        )
+                    existing.source = new_source
+                    existing.system_prompt = new_sys
+                    conversation_event_broadcaster.publish("updated", conversation_id)
                 return existing
         return self.create_conversation(
             user_id=user_id,
@@ -80,6 +171,9 @@ class ConversationRepository:
         content: str,
         request_id: Optional[str] = None,
         provider: str = "",
+        thinking_content: str = "",
+        tool_calls_json: str = "",
+        raw_payload_json: str = "",
         attachments: Optional[List[ExtractedAttachmentInputDTO]] = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
@@ -104,9 +198,10 @@ class ConversationRepository:
                 INSERT INTO chat_messages (
                     id, conversation_id, request_id, user_id, role,
                     model_id, provider, content,
+                    thinking_content, tool_calls_json, raw_payload_json,
                     prompt_tokens, completion_tokens, total_tokens,
                     latency_ms, ttft_ms, status, error_detail, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_id,
@@ -117,6 +212,9 @@ class ConversationRepository:
                     model_id,
                     provider,
                     content,
+                    thinking_content or "",
+                    tool_calls_json or "",
+                    raw_payload_json or "",
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
@@ -196,6 +294,8 @@ class ConversationRepository:
                 (user_id,),
             ).fetchone()
 
+        conversation_event_broadcaster.publish("message_appended", conversation_id)
+
         return ConversationMessageDTO(
             id=msg_id,
             conversation_id=conversation_id,
@@ -207,6 +307,9 @@ class ConversationRepository:
             model_id=model_id,
             provider=provider,
             content=content,
+            thinking_content=thinking_content or "",
+            tool_calls_json=tool_calls_json or "",
+            raw_payload_json=raw_payload_json or "",
             attachments=saved_attachments,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -226,14 +329,19 @@ class ConversationRepository:
         search: Optional[str] = None,
         search_field: Optional[str] = None,
         is_archived: bool = False,
+        is_deleted: bool = False,
         sort_field: Optional[str] = None,
         sort_order: str = "desc",
         limit: int = 100,
         offset: int = 0,
     ) -> List[ConversationSummaryDTO]:
         """Filtrelere ve sıralama ölçütlerine göre sohbet oturumlarını kullanıcı ve dosya eki bilgileriyle listeler."""
-        clauses = ["c.is_archived = ?"]
-        params: List[object] = [1 if is_archived else 0]
+        if is_deleted:
+            clauses = ["COALESCE(c.is_deleted, 0) = 1"]
+            params: List[object] = []
+        else:
+            clauses = ["COALESCE(c.is_deleted, 0) = 0", "c.is_archived = ?"]
+            params = [1 if is_archived else 0]
 
         if user_id:
             clauses.append("c.user_id = ?")
@@ -303,6 +411,7 @@ class ConversationRepository:
                 SELECT
                     c.id, c.user_id, c.title, c.model_id, c.system_prompt,
                     c.source, c.is_pinned, c.is_archived,
+                    COALESCE(c.is_deleted, 0) AS is_deleted,
                     c.total_messages, c.total_tokens, c.created_at, c.updated_at,
                     COALESCE(u.email, c.user_id) AS user_email,
                     COALESCE(u.full_name, c.user_id) AS user_full_name,
@@ -343,6 +452,7 @@ class ConversationRepository:
                     source="api" if r["source"] == "api" else "studio",
                     is_pinned=bool(r["is_pinned"]),
                     is_archived=bool(r["is_archived"]),
+                    is_deleted=bool(r["is_deleted"]),
                     total_messages=r["total_messages"],
                     total_tokens=r["total_tokens"],
                     attachment_names=att_map.get(cid, []),
@@ -361,6 +471,7 @@ class ConversationRepository:
                 SELECT
                     c.id, c.user_id, c.title, c.model_id, c.system_prompt,
                     c.source, c.is_pinned, c.is_archived,
+                    COALESCE(c.is_deleted, 0) AS is_deleted,
                     c.total_messages, c.total_tokens, c.created_at, c.updated_at,
                     COALESCE(u.email, c.user_id) AS user_email,
                     COALESCE(u.full_name, c.user_id) AS user_full_name,
@@ -395,6 +506,7 @@ class ConversationRepository:
             source="api" if row["source"] == "api" else "studio",
             is_pinned=bool(row["is_pinned"]),
             is_archived=bool(row["is_archived"]),
+            is_deleted=bool(row["is_deleted"]),
             total_messages=row["total_messages"],
             total_tokens=row["total_tokens"],
             attachment_names=att_map.get(conversation_id, []),
@@ -415,6 +527,9 @@ class ConversationRepository:
                 SELECT
                     m.id, m.conversation_id, m.request_id, m.user_id,
                     m.role, m.model_id, m.provider, m.content,
+                    COALESCE(m.thinking_content, '') AS thinking_content,
+                    COALESCE(m.tool_calls_json, '') AS tool_calls_json,
+                    COALESCE(m.raw_payload_json, '') AS raw_payload_json,
                     m.prompt_tokens, m.completion_tokens, m.total_tokens,
                     m.latency_ms, m.ttft_ms, m.status, m.error_detail, m.created_at,
                     COALESCE(u.email, m.user_id) AS user_email,
@@ -458,9 +573,18 @@ class ConversationRepository:
                 )
             )
 
+        from app.services.message_formatter_service import MessageFormatterService
+
         messages: List[ConversationMessageDTO] = []
         for mr in msg_rows:
             mid = mr["id"]
+            msg_atts = attachments_by_msg.get(mid, [])
+            msg_dict_for_fmt = dict(mr)
+            msg_dict_for_fmt["attachments"] = [a.model_dump() for a in msg_atts]
+            formatted_studio_content = MessageFormatterService.format_message_record_for_studio_display(
+                msg_dict_for_fmt,
+                conversation_system_prompt=summary.system_prompt or "",
+            )
             messages.append(
                 ConversationMessageDTO(
                     id=mid,
@@ -472,8 +596,11 @@ class ConversationRepository:
                     role=mr["role"],
                     model_id=mr["model_id"],
                     provider=mr["provider"] or "",
-                    content=mr["content"],
-                    attachments=attachments_by_msg.get(mid, []),
+                    content=formatted_studio_content,
+                    thinking_content=mr["thinking_content"] or "",
+                    tool_calls_json=mr["tool_calls_json"] or "",
+                    raw_payload_json=mr["raw_payload_json"] or "",
+                    attachments=msg_atts,
                     prompt_tokens=mr["prompt_tokens"],
                     completion_tokens=mr["completion_tokens"],
                     total_tokens=mr["total_tokens"],
@@ -514,6 +641,13 @@ class ConversationRepository:
         if dto.is_archived is not None:
             fields.append("is_archived = ?")
             params.append(1 if dto.is_archived else 0)
+            if dto.is_archived and dto.is_deleted is None:
+                fields.append("is_deleted = 0")
+        if dto.is_deleted is not None:
+            fields.append("is_deleted = ?")
+            params.append(1 if dto.is_deleted else 0)
+            if not dto.is_deleted and dto.is_archived is None:
+                fields.append("is_archived = 0")
 
         if not fields:
             return self.get_conversation_summary(conversation_id)
@@ -527,16 +661,41 @@ class ConversationRepository:
                 f"UPDATE chat_conversations SET {', '.join(fields)} WHERE id = ?",
                 tuple(params),
             )
+        conversation_event_broadcaster.publish("updated", conversation_id)
         return self.get_conversation_summary(conversation_id)
 
-    def delete_conversation(self, conversation_id: str) -> bool:
-        """Sohbet oturumunu, ilişkili tüm mesajlarını ve dosya eklerini (CASCADE) siler."""
+    def delete_conversation(self, conversation_id: str, permanent: bool = False) -> bool:
+        """
+        Sohbet oturumunu çöp kutusuna taşır (soft delete: is_deleted = 1).
+        Eğer permanent=True ise ilişkili tüm mesaj ve dosya ekleriyle birlikte (CASCADE) kalıcı olarak siler.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
         with sqlite_db.connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM chat_conversations WHERE id = ?",
-                (conversation_id,),
+            if permanent:
+                cursor = conn.execute(
+                    "DELETE FROM chat_conversations WHERE id = ?",
+                    (conversation_id,),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE chat_conversations SET is_deleted = 1, is_pinned = 0, updated_at = ? WHERE id = ?",
+                    (now_iso, conversation_id),
+                )
+            deleted = cursor.rowcount > 0
+        if deleted:
+            conversation_event_broadcaster.publish("deleted", conversation_id)
+        return deleted
+
+    def restore_conversation(self, conversation_id: str) -> Optional[ConversationSummaryDTO]:
+        """Çöp kutusundaki sohbet oturumunu aktif listeye geri yükler (is_deleted = 0, is_archived = 0)."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with sqlite_db.connection() as conn:
+            conn.execute(
+                "UPDATE chat_conversations SET is_deleted = 0, is_archived = 0, updated_at = ? WHERE id = ?",
+                (now_iso, conversation_id),
             )
-            return cursor.rowcount > 0
+        conversation_event_broadcaster.publish("updated", conversation_id)
+        return self.get_conversation_summary(conversation_id)
 
     @staticmethod
     def _fetch_attachment_names_by_conversations(

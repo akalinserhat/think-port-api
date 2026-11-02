@@ -213,6 +213,10 @@ function optionalPeerStubPlugin(): Plugin {
               search: searchVal,
               search_field: parsedUrl.searchParams.get('aramaTipi') || undefined,
               is_archived: parsedUrl.searchParams.get('arsivdekiler') || undefined,
+              is_deleted:
+                parsedUrl.searchParams.get('silinmisleriGetir') ||
+                parsedUrl.searchParams.get('silinenler') ||
+                undefined,
               sort_field: sortFieldVal,
               sort_order: sortOrderVal,
               page: parsedUrl.searchParams.get('page') || 1,
@@ -225,6 +229,11 @@ function optionalPeerStubPlugin(): Plugin {
           res.statusCode = result.status;
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'GET' && subPath === 'events') {
+          next();
           return;
         }
 
@@ -262,7 +271,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if (req.method === 'POST' && subPath === 'record-turn') {
             const result = runSqliteBridge({
@@ -359,7 +368,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
           const result = runSqliteBridge({
             action: 'system_users_login',
             body: parsedBody,
@@ -367,7 +376,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedRes: Record<string, unknown> = {};
           try {
             parsedRes = JSON.parse(result.body || '{}');
-          } catch {}
+          } catch { }
           if (parsedRes.authenticated === false) {
             res.statusCode = 401;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -400,7 +409,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedRes: Record<string, unknown> = {};
           try {
             parsedRes = JSON.parse(result.body || '{}');
-          } catch {}
+          } catch { }
           if (parsedRes.error) {
             res.statusCode = 400;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -421,7 +430,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if (req.method === 'POST' && !subPath) {
             const result = runSqliteBridge({
@@ -431,7 +440,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -465,7 +474,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -535,7 +544,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedRes: Record<string, unknown> = {};
           try {
             parsedRes = JSON.parse(result.body || '{}');
-          } catch {}
+          } catch { }
           if (parsedRes.error) {
             res.statusCode = 400;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -556,7 +565,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedRes: Record<string, unknown> = {};
           try {
             parsedRes = JSON.parse(result.body || '{}');
-          } catch {}
+          } catch { }
           if (parsedRes.error) {
             res.statusCode = 400;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -577,7 +586,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if (req.method === 'POST' && tokenListMatch) {
             const userId = decodeURIComponent(tokenListMatch[1]);
@@ -589,7 +598,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -614,7 +623,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -635,7 +644,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -669,7 +678,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -719,7 +728,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if (req.method === 'POST' && !subPath) {
             const result = runSqliteBridge({
@@ -758,7 +767,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedRes: Record<string, unknown> = {};
           try {
             parsedRes = JSON.parse(result.body || '{}');
-          } catch {}
+          } catch { }
           if (parsedRes.error) {
             res.statusCode = 400;
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -779,7 +788,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if (req.method === 'POST' && !subPath) {
             const result = runSqliteBridge({
@@ -789,7 +798,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -811,7 +820,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -858,7 +867,7 @@ function optionalPeerStubPlugin(): Plugin {
           let parsedBody: Record<string, unknown> = {};
           try {
             parsedBody = JSON.parse(body || '{}');
-          } catch {}
+          } catch { }
 
           if ((req.method === 'PUT' || req.method === 'PATCH' || req.method === 'POST') && !subPath) {
             const result = runSqliteBridge({
@@ -890,7 +899,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -911,7 +920,7 @@ function optionalPeerStubPlugin(): Plugin {
             let parsedRes: Record<string, unknown> = {};
             try {
               parsedRes = JSON.parse(result.body || '{}');
-            } catch {}
+            } catch { }
             if (parsedRes.error) {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -963,7 +972,7 @@ function optionalPeerStubPlugin(): Plugin {
             fs.appendFileSync(path.join(logDir, 'frontend_errors.log'), entry, 'utf-8');
             const gwLine = `${ts.replace('T', ' ').slice(0, 19)} | ERROR   | FRONTEND_ERROR | type=${payload.type || 'ERROR'} | message=${payload.message || ''}\n`;
             fs.appendFileSync(path.join(logDir, 'gateway.log'), gwLine, 'utf-8');
-          } catch {}
+          } catch { }
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ status: 'logged' }));
@@ -1099,7 +1108,7 @@ export default defineConfig({
                           const chunkJson = JSON.parse(trimmed.slice(6));
                           const delta = chunkJson.choices?.[0]?.delta?.content;
                           if (delta) assistantText += delta;
-                        } catch {}
+                        } catch { }
                       }
                     }
                   } else {
@@ -1126,7 +1135,7 @@ export default defineConfig({
                       },
                     });
                   }
-                } catch {}
+                } catch { }
               });
             }
           });

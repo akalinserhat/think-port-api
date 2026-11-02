@@ -1,5 +1,11 @@
+"""
+ThinkPort AI Gateway - Sohbet Tamamlama Orkestrasyon Servisi (chat_service.py).
+OpenAI uyumlu /v1/chat/completions isteklerinin hazırlanmasını, sohbet geçmişinin (kullanıcı istemi,
+ekli dosyalar ve model yanıtlarının) SQLite veritabanına anlık kaydedilmesini ve SSE/senkron akışını yönetir.
+"""
 from __future__ import annotations
 import asyncio
+import json
 import time
 import uuid
 from typing import AsyncGenerator, Callable, Dict, Any, List, Optional, Tuple, Union
@@ -82,7 +88,16 @@ class ChatService:
         clean_user_text, attachments, system_prompt = (
             self._formatter.extract_last_user_message_details(request.messages)
         )
-        source = request.source or ("studio" if request.conversation_id else "api")
+        source = (
+            "studio"
+            if request.source == "studio"
+            or (
+                request.source is None
+                and bool(request.conversation_id)
+                and request.conversation_id.startswith("conv_")
+            )
+            else "api"
+        )
         initial_title = ConversationRepository._derive_title_from_prompt(
             clean_user_text, attachments
         )
@@ -101,12 +116,113 @@ class ChatService:
             incoming_role = "tool"
             tool_content = str(last_msg.content or "")
             tool_name = last_msg.name or "tool"
-            incoming_content = f"[{tool_name}]: {tool_content}" if tool_content else f"[{tool_name}]"
+            tool_call_id_str = last_msg.tool_call_id or ""
+            incoming_content = (
+                f"[{tool_name}" + (f" | call_id={tool_call_id_str}" if tool_call_id_str else "") + f"]: {tool_content}"
+                if tool_content
+                else f"[{tool_name}]"
+            )
             auto_title = False
         else:
             incoming_role = "user"
             incoming_content = clean_user_text
             auto_title = True
+
+        sanitized_incoming_messages: List[Dict[str, Any]] = []
+        for m in request.messages:
+            md = m.model_dump(exclude_none=True)
+            if isinstance(md.get("content"), list):
+                clean_parts: List[Dict[str, Any]] = []
+                for p in md["content"]:
+                    if isinstance(p, dict) and p.get("type") in ("file", "document", "input_file"):
+                        fname, mime_type, fsize, est_tokens, resolved_doc_txt = (
+                            self._formatter.resolve_document_part(p)
+                        )
+                        has_raw_file = bool(
+                            p.get("file_data")
+                            or p.get("base64_data")
+                            or p.get("data_url")
+                            or (isinstance(p.get("file"), dict) and p["file"].get("file_data"))
+                        )
+                        p_copy = {
+                            "type": p.get("type", "file"),
+                            "file_name": fname,
+                            "mime_type": mime_type,
+                            "file_size": fsize,
+                            "estimated_tokens": est_tokens,
+                            "extracted_chars": len(resolved_doc_txt),
+                            "sent_as_raw_attachment": has_raw_file,
+                        }
+                        clean_parts.append(p_copy)
+                    else:
+                        clean_parts.append(p)
+                md["content"] = clean_parts
+            sanitized_incoming_messages.append(md)
+
+        outgoing_raw_payload: Dict[str, Any] = {
+            "direction": "OUTGOING_REQUEST",
+            "request_id": job_id,
+            "conversation_id": conversation.id,
+            "source": source,
+            "requested_model": request.model,
+            "resolved_model": normalized_model,
+            "provider": provider,
+            "stream": bool(request.stream),
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "response_format": normalized_rf,
+            "system_prompt": system_prompt,
+            "tools_count": len(request.tools or []),
+            "tools": request.tools or [],
+            "tool_choice": request.tool_choice,
+            "incoming_messages_count": len(request.messages),
+            "incoming_messages": sanitized_incoming_messages,
+            "attachments": [
+                {
+                    "file_name": a.file_name,
+                    "file_kind": a.file_kind,
+                    "mime_type": a.mime_type,
+                    "file_size": a.file_size,
+                    "estimated_tokens": a.estimated_tokens,
+                    "extracted_chars": len(a.extracted_text or ""),
+                    "extracted_text": a.extracted_text or "",
+                }
+                for a in attachments
+            ],
+            "prompt_tokens": prompt_tokens,
+        }
+
+        out_trace_lines: List[str] = [
+            f"📤 [GİDEN LLM İSTEĞİ / OUTGOING PAYLOAD] (Rol: {incoming_role} | Kaynak: {source})",
+            f"• İstek ID: {job_id} | İstenen Model: {request.model} -> Çözümlenen: {normalized_model} ({provider})",
+            f"• İstek Parametreleri: stream={bool(request.stream)} | temperature={request.temperature} | max_tokens={request.max_tokens} | response_format={json.dumps(normalized_rf, ensure_ascii=False) if normalized_rf else 'text'} | Girdi Token={prompt_tokens}",
+            f"• Geçmiş Mesaj Sayısı: {len(request.messages)} mesaj | Gönderilen Karakter: {len(incoming_content)} krk",
+        ]
+        if system_prompt:
+            out_trace_lines.append(f"• Sistem Yönergesi (System Prompt - {len(system_prompt)} krk):\n{system_prompt}")
+        if request.tools:
+            tool_summaries = []
+            for t_obj in request.tools:
+                fn_obj = t_obj.get("function", {}) if isinstance(t_obj, dict) else {}
+                t_name = fn_obj.get("name") or t_obj.get("name") or "tool"
+                t_desc = fn_obj.get("description") or ""
+                t_params = json.dumps(fn_obj.get("parameters", {}), ensure_ascii=False)
+                tool_summaries.append(f"  - {t_name}: {t_desc} | Şema: {t_params}")
+            out_trace_lines.append(
+                f"• LLM'e Gönderilen Araç Tanımları (Tools - {len(request.tools)} adet | tool_choice={request.tool_choice or 'auto'}):\n"
+                + "\n".join(tool_summaries)
+            )
+        if attachments:
+            att_lines = []
+            for a in attachments:
+                ext_txt = (a.extracted_text or "").strip()
+                att_lines.append(
+                    f"  - 📎 {a.file_name} ({a.file_kind}, {a.mime_type or 'belge'}, {a.file_size} bayt, "
+                    f"Çıkarılan Metin={len(ext_txt)} krk, ~{a.estimated_tokens} token)"
+                )
+                if ext_txt:
+                    att_lines.append(f"    [LLM'e Aktarılan Belge Metni ({len(ext_txt)} krk)]:\n{ext_txt}")
+            out_trace_lines.append(f"• Ekli Dosyalar ({len(attachments)} adet):\n" + "\n".join(att_lines))
 
         saved_user_msg = self._conversation_repo.append_message(
             conversation_id=conversation.id,
@@ -116,6 +232,9 @@ class ChatService:
             content=incoming_content,
             request_id=job_id,
             provider=provider,
+            thinking_content="\n".join(out_trace_lines),
+            tool_calls_json=json.dumps(request.tools, ensure_ascii=False) if request.tools else "",
+            raw_payload_json=json.dumps(outgoing_raw_payload, ensure_ascii=False),
             attachments=attachments if incoming_role == "user" else None,
             prompt_tokens=prompt_tokens,
             completion_tokens=0,
@@ -152,7 +271,7 @@ class ChatService:
 
     async def build_sync_response(self, job: ChatJobDTO) -> ChatCompletionResponseDTO:
         """Kanaldan tüm yanıt parçalarını toplar, JSON modundaysa ayıklar ve OpenAI senkron yanıt DTO'su oluşturur."""
-        full_content, completion_tokens, _, _, tool_calls = await self._collect_full_response(job)
+        full_content, completion_tokens, _, _, tool_calls, reasoning_text = await self._collect_full_response(job)
         if self._formatter.is_json_mode_requested(job.response_format) and full_content:
             full_content = self._formatter.extract_and_normalize_json_content(full_content)
             completion_tokens = DocumentService.estimate_tokens(full_content)
@@ -168,6 +287,8 @@ class ChatService:
                     message=ChatMessageDTO(
                         role="assistant",
                         content=full_content if full_content else None,
+                        reasoning_content=reasoning_text if reasoning_text else None,
+                        thinking=reasoning_text if reasoning_text else None,
                         tool_calls=tool_calls,
                     ),
                     finish_reason=finish_reason,
@@ -196,6 +317,45 @@ class ChatService:
         status = "success"
         error_detail = ""
         collected_chunks: List[str] = []
+        collected_reasoning: List[str] = []
+        collected_tool_calls: List[Dict[str, Any]] = []
+        studio_reasoning_started = False
+        studio_reasoning_closed = False
+        finalized = False
+
+        def _do_finalize() -> None:
+            nonlocal finalized, completion_tokens
+            if finalized:
+                return
+            finalized = True
+            raw_stream_text = "".join(collected_chunks)
+            stream_preview = raw_stream_text
+            if not stream_preview and collected_tool_calls:
+                call_names = ", ".join(
+                    tc.get("function", {}).get("name", "tool") for tc in collected_tool_calls
+                )
+                stream_preview = f"[Araç Çağrısı: {call_names}]"
+            if completion_tokens == 0 and (raw_stream_text or collected_tool_calls or collected_reasoning):
+                completion_tokens = DocumentService.estimate_tokens(
+                    raw_stream_text
+                    + "".join(collected_reasoning)
+                    + (json.dumps(collected_tool_calls, ensure_ascii=False) if collected_tool_calls else "")
+                )
+            self._finalize_job(
+                job=job,
+                completion_tokens=completion_tokens,
+                is_stream=True,
+                start_time=start_time,
+                ttft_ms=ttft_ms,
+                status=status,
+                upstream_provider=upstream_provider,
+                response_preview=stream_preview,
+                raw_response_text=raw_stream_text,
+                reasoning_text="".join(collected_reasoning),
+                tool_calls=collected_tool_calls,
+                error_detail=error_detail,
+                session_id=used_session,
+            )
 
         try:
             yield self._format_sse_chunk(
@@ -217,30 +377,72 @@ class ChatService:
                 if payload.get("error_detail"):
                     error_detail = payload["error_detail"]
 
-                if payload["event"] == "delta":
+                if payload["event"] == "reasoning":
+                    r_text = payload.get("text") or ""
+                    if r_text:
+                        if ttft_ms == 0:
+                            ttft_ms = int((time.perf_counter() - start_time) * 1000)
+                        collected_reasoning.append(r_text)
+                        completion_tokens += DocumentService.estimate_tokens(r_text)
+                        studio_content_piece: Optional[str] = None
+                        if job.source == "studio":
+                            if not studio_reasoning_started:
+                                studio_reasoning_started = True
+                                studio_content_piece = f"<think>{r_text}"
+                            else:
+                                studio_content_piece = r_text
+                        yield self._format_sse_chunk(
+                            job.job_id,
+                            created_ts,
+                            job.model,
+                            DeltaMessageDTO(
+                                reasoning_content=r_text,
+                                content=studio_content_piece,
+                            ),
+                            conversation_id=job.conversation_id,
+                        )
+                elif payload["event"] == "delta":
                     delta_text = payload["text"]
                     if ttft_ms == 0:
                         ttft_ms = int((time.perf_counter() - start_time) * 1000)
                     collected_chunks.append(delta_text)
                     completion_tokens += DocumentService.estimate_tokens(delta_text)
+                    out_delta = delta_text
+                    if job.source == "studio" and studio_reasoning_started and not studio_reasoning_closed:
+                        studio_reasoning_closed = True
+                        out_delta = f"</think>\n\n{delta_text}"
                     yield self._format_sse_chunk(
                         job.job_id,
                         created_ts,
                         job.model,
-                        DeltaMessageDTO(content=delta_text),
+                        DeltaMessageDTO(content=out_delta),
                         conversation_id=job.conversation_id,
                     )
                 elif payload["event"] == "tool_calls":
+                    if ttft_ms == 0:
+                        ttft_ms = int((time.perf_counter() - start_time) * 1000)
+                    tcs = payload.get("tool_calls") or []
+                    if tcs:
+                        collected_tool_calls.extend(tcs)
                     yield self._format_sse_chunk(
                         job.job_id,
                         created_ts,
                         job.model,
-                        DeltaMessageDTO(tool_calls=payload.get("tool_calls")),
+                        DeltaMessageDTO(tool_calls=tcs),
                         finish_reason="tool_calls",
                         conversation_id=job.conversation_id,
                     )
                 elif payload["event"] == "done":
-                    finish_reason = "error" if status in ("error", "timeout") and not collected_chunks else "stop"
+                    finish_reason = (
+                        "error"
+                        if status in ("error", "timeout")
+                        and not collected_chunks
+                        and not collected_tool_calls
+                        and not collected_reasoning
+                        else ("tool_calls" if collected_tool_calls and not collected_chunks else "stop")
+                    )
+                    # [DONE] göndermeden önce SQLite kaydını tamamla (yarış durumunu / race condition'ı önler)
+                    _do_finalize()
                     yield self._format_sse_chunk(
                         job.job_id,
                         created_ts,
@@ -257,6 +459,7 @@ class ChatService:
                 f"Web AI Gateway akışı {settings.web_gateway_timeout_sec} saniye üst sınırını aştı (Gateway Timeout)."
             )
             gateway_logger.error(f"CHAT_STREAM_TIMEOUT | id={job.job_id} | model={job.model}")
+            _do_finalize()
             yield self._format_sse_chunk(
                 job.job_id,
                 created_ts,
@@ -267,25 +470,15 @@ class ChatService:
             )
             yield "data: [DONE]\n\n"
         finally:
-            self._finalize_job(
-                job=job,
-                completion_tokens=completion_tokens,
-                is_stream=True,
-                start_time=start_time,
-                ttft_ms=ttft_ms,
-                status=status,
-                upstream_provider=upstream_provider,
-                response_preview="".join(collected_chunks),
-                error_detail=error_detail,
-                session_id=used_session,
-            )
+            _do_finalize()
 
     async def _collect_full_response(
         self, job: ChatJobDTO
-    ) -> Tuple[str, int, str, int, Optional[List[Dict[str, Any]]]]:
-        """Senkron istekler için kanaldaki tüm delta parçalarını ve tool_calls olaylarını birleştirir."""
+    ) -> Tuple[str, int, str, int, Optional[List[Dict[str, Any]]], str]:
+        """Senkron istekler için kanaldaki tüm delta, reasoning ve tool_calls olaylarını birleştirir."""
         channel = self._channel_repo.get_channel(job.job_id)
         collected: List[str] = []
+        collected_reasoning: List[str] = []
         collected_tool_calls: List[Dict[str, Any]] = []
         start_time = time.perf_counter()
         deadline = start_time + float(settings.web_gateway_timeout_sec)
@@ -294,6 +487,7 @@ class ChatService:
         upstream_provider = job.provider
         status = "success"
         error_detail = ""
+        combined_reasoning = ""
 
         try:
             if channel:
@@ -310,7 +504,12 @@ class ChatService:
                     if payload.get("error_detail"):
                         error_detail = payload["error_detail"]
 
-                    if payload["event"] == "delta":
+                    if payload["event"] == "reasoning":
+                        if ttft_ms == 0:
+                            ttft_ms = int((time.perf_counter() - start_time) * 1000)
+                        if payload.get("text"):
+                            collected_reasoning.append(payload["text"])
+                    elif payload["event"] == "delta":
                         if ttft_ms == 0:
                             ttft_ms = int((time.perf_counter() - start_time) * 1000)
                         collected.append(payload["text"])
@@ -329,10 +528,25 @@ class ChatService:
                 f"CHAT_SYNC_TIMEOUT | id={job.job_id} | model={job.model} | timeout={settings.web_gateway_timeout_sec}s"
             )
         finally:
-            full_text = "".join(collected)
+            raw_full_text = "".join(collected)
+            think_from_tags, cleaned_from_tags = self._formatter.extract_thinking_and_clean_content(raw_full_text)
+            streamed_reasoning = "".join(collected_reasoning).strip()
+            combined_reasoning = "\n\n".join(
+                p for p in (streamed_reasoning, think_from_tags) if p
+            ).strip()
+
+            full_text = raw_full_text
             if self._formatter.is_json_mode_requested(job.response_format) and full_text and status == "success":
                 full_text = self._formatter.extract_and_normalize_json_content(full_text)
-            comp_tokens = DocumentService.estimate_tokens(full_text)
+            elif think_from_tags and cleaned_from_tags and job.source == "api":
+                # API yanıtında <think> bloğunu reasoning_content'e ayırıp content'i temiz tut
+                full_text = cleaned_from_tags
+
+            comp_tokens = DocumentService.estimate_tokens(
+                raw_full_text
+                + streamed_reasoning
+                + (json.dumps(collected_tool_calls, ensure_ascii=False) if collected_tool_calls else "")
+            )
             preview_text = full_text
             if not preview_text and collected_tool_calls:
                 call_names = ", ".join(
@@ -349,17 +563,22 @@ class ChatService:
                 status=status,
                 upstream_provider=upstream_provider,
                 response_preview=preview_text,
+                raw_response_text=raw_full_text,
+                reasoning_text=combined_reasoning,
+                tool_calls=collected_tool_calls,
                 error_detail=error_detail,
                 session_id=used_session,
             )
 
-        if status == "timeout" or (status == "error" and not full_text and not collected_tool_calls):
+        if status == "timeout" or (
+            status == "error" and not full_text and not collected_tool_calls and not combined_reasoning
+        ):
             raise gateway_timeout_error(
                 message=error_detail
                 or f"Model '{job.requested_model or job.model}' ({job.model}) alt sağlayıcısından sürede yanıt alınamadı."
             )
 
-        return full_text, comp_tokens, used_session, latency_ms, (collected_tool_calls or None)
+        return full_text, comp_tokens, used_session, latency_ms, (collected_tool_calls or None), combined_reasoning
 
     def _finalize_job(
         self,
@@ -373,32 +592,161 @@ class ChatService:
         response_preview: str,
         error_detail: str,
         session_id: str,
+        raw_response_text: str = "",
+        reasoning_text: str = "",
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """
         İş tamamlandığında kanalı siler, eşzamanlılık slotunu bırakır,
-        modelin ürettiği tam yanıtı SQLite chat_messages tablosuna yazar ve telemetriyi kaydeder.
+        modelin ürettiği tam yanıtı, düşünce sürecini (thinking_content), araç çağrılarını (tool_calls_json)
+        ve ham iletişim paketini (raw_payload_json) SQLite chat_messages tablosuna yazar ve telemetriyi kaydeder.
         """
         self._channel_repo.remove_channel(job.job_id)
         self._auth_service.release_concurrency_slot(job.user_id)
         latency_ms = int((time.perf_counter() - start_time) * 1000)
+        effective_ttft = ttft_ms or latency_ms
         clean_user_text, attachments, _ = (
             self._formatter.extract_last_user_message_details(job.messages)
         )
         attachment_names = [a.file_name for a in attachments]
+        tc_list = tool_calls or []
+        tc_json_str = json.dumps(tc_list, ensure_ascii=False, indent=2) if tc_list else ""
+        tc_display_list = self._formatter.expand_tool_calls_for_display(tc_list) if tc_list else []
+        tc_display_json_str = (
+            json.dumps(tc_display_list, ensure_ascii=False, indent=2) if tc_display_list else ""
+        )
+
+        raw_unfiltered = (
+            raw_response_text
+            if raw_response_text
+            else ("" if tc_list else response_preview)
+        )
+        think_from_tags, _ = self._formatter.extract_thinking_and_clean_content(raw_unfiltered)
+
+        thought_segments: List[str] = []
+        if reasoning_text and reasoning_text.strip():
+            thought_segments.append(reasoning_text.strip())
+        if think_from_tags and think_from_tags.strip() and think_from_tags.strip() not in (reasoning_text or ""):
+            thought_segments.append(think_from_tags.strip())
+        if tc_display_list and not thought_segments:
+            tc_reasons = []
+            for idx, tc in enumerate(tc_display_list):
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                fn_name = fn.get("name", "tool")
+                fn_args_obj = fn.get("arguments", {})
+                fn_args_pretty = (
+                    json.dumps(fn_args_obj, ensure_ascii=False, indent=2)
+                    if isinstance(fn_args_obj, (dict, list))
+                    else str(fn_args_obj)
+                )
+                tc_reasons.append(
+                    f"{idx + 1}. Araç Seçimi: `{fn_name}` (Çağrı ID: `{tc.get('id', '-') if isinstance(tc, dict) else '-'}`)\n"
+                    f"   Üretilen Argümanlar:\n{fn_args_pretty}"
+                )
+            thought_segments.append(
+                "Model, gelen sistem yönergesini, kullanıcı istemini ve tanımlı araç (tool) şemalarını değerlendirerek "
+                "doğrudan metin yanıtı yerine aşağıdaki fonksiyon çağrısını (tool_calls) çalıştırmaya karar verdi:\n"
+                + "\n".join(tc_reasons)
+            )
+        elif self._formatter.is_json_mode_requested(job.response_format) and not thought_segments and raw_unfiltered:
+            thought_segments.append(
+                f"Model `response_format=json_object` kısıtlaması altında çalışarak {len(raw_unfiltered)} karakterlik "
+                f"yapılandırılmış JSON yanıtı üretti (Normalize edilen çıktı: {len(response_preview)} karakter)."
+            )
+
+        combined_thoughts = "\n\n".join(thought_segments).strip()
+
+        thinking_lines: List[str] = []
+        if combined_thoughts:
+            thinking_lines.append("🧠 [LLM DÜŞÜNCE SÜRECİ / INTERNAL REASONING]")
+            thinking_lines.append(combined_thoughts)
+            thinking_lines.append("---")
+
+        thinking_lines.append(
+            f"📥 [GELEN LLM YANITI & TEKNİK İLETİŞİM RAPORU / INCOMING PAYLOAD] (Model: {job.model} | İstenen: {job.requested_model} | Sağlayıcı: {upstream_provider})"
+        )
+        thinking_lines.append(
+            f"• İstek ID: {job.job_id} | Oturum (Session): {session_id} | Akış Modu: {'SSE Stream' if is_stream else 'Senkron JSON'}"
+        )
+        thinking_lines.append(
+            f"• Telemetri: Girdi={job.prompt_tokens} tok | Çıktı={completion_tokens} tok | Toplam={job.prompt_tokens + completion_tokens} tok | İlk Token (TTFT)={effective_ttft} ms | Toplam Süre={latency_ms} ms | Durum={status}"
+        )
+        thinking_lines.append(
+            f"• Karakter İstatistiği: Ham Çıktı={len(raw_unfiltered)} krk | İşlenmiş Çıktı={len(response_preview)} krk | Düşünce={len(combined_thoughts)} krk"
+        )
+        if tc_display_list:
+            thinking_lines.append(
+                f"• Tetiklenen Araç Çağrıları (tool_calls - {len(tc_display_list)} adet):\n{tc_display_json_str}"
+            )
+        if raw_unfiltered and raw_unfiltered != response_preview:
+            thinking_lines.append(f"• Modelin Ham (Filtrelenmemiş) Çıktısı:\n{raw_unfiltered}")
+        if error_detail:
+            thinking_lines.append(f"• Hata Detayı: {error_detail}")
+
+        final_thinking_content = "\n".join(thinking_lines)
+
+        # Sohbet ekranında görünür asistan içeriği: eğer yalnızca tool_calls döndüyse, argümanlarıyla birlikte sakla
+        saved_assistant_content = response_preview
+        if tc_display_list:
+            call_names = ", ".join(
+                tc.get("function", {}).get("name", "tool")
+                for tc in tc_display_list
+                if isinstance(tc, dict)
+            )
+            if not raw_unfiltered.strip():
+                saved_assistant_content = (
+                    f"🔧 **Tetiklenen Araç Çağrısı (`{call_names}`):**\n```json\n{tc_display_json_str}\n```"
+                )
+            else:
+                saved_assistant_content = (
+                    f"{raw_unfiltered}\n\n🔧 **Tetiklenen Araç Çağrısı (`{call_names}`):**\n```json\n{tc_display_json_str}\n```"
+                )
+        elif raw_unfiltered and not saved_assistant_content:
+            saved_assistant_content = raw_unfiltered
+        elif combined_thoughts and not saved_assistant_content.strip():
+            saved_assistant_content = combined_thoughts
+
+        incoming_raw_payload: Dict[str, Any] = {
+            "direction": "INCOMING_RESPONSE",
+            "request_id": job.job_id,
+            "conversation_id": job.conversation_id,
+            "source": job.source,
+            "requested_model": job.requested_model,
+            "resolved_model": job.model,
+            "provider": upstream_provider,
+            "session_id": session_id,
+            "is_stream": is_stream,
+            "raw_unfiltered_output": raw_unfiltered,
+            "normalized_output": response_preview,
+            "thinking_content": combined_thoughts,
+            "tool_calls": tc_list,
+            "metrics": {
+                "prompt_tokens": job.prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": job.prompt_tokens + completion_tokens,
+                "ttft_ms": effective_ttft,
+                "latency_ms": latency_ms,
+                "status": status,
+                "error_detail": error_detail,
+            },
+        }
 
         self._conversation_repo.append_message(
             conversation_id=job.conversation_id,
             user_id=job.user_id,
             role="assistant",
             model_id=job.model,
-            content=response_preview,
+            content=saved_assistant_content,
             request_id=job.job_id,
             provider=upstream_provider,
+            thinking_content=final_thinking_content,
+            tool_calls_json=tc_json_str,
+            raw_payload_json=json.dumps(incoming_raw_payload, ensure_ascii=False),
             attachments=None,
-            prompt_tokens=0,
+            prompt_tokens=job.prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
-            ttft_ms=ttft_ms or latency_ms,
+            ttft_ms=effective_ttft,
             status=status,
             error_detail=error_detail,
             auto_update_title=False,
@@ -414,11 +762,11 @@ class ChatService:
                 completion_tokens=completion_tokens,
                 is_stream=is_stream,
                 latency_ms=latency_ms,
-                ttft_ms=ttft_ms or latency_ms,
+                ttft_ms=effective_ttft,
                 status=status,
                 upstream_provider=upstream_provider,
                 prompt_preview=clean_user_text,
-                response_preview=response_preview,
+                response_preview=saved_assistant_content,
                 attachment_names=attachment_names,
                 error_detail=error_detail,
                 session_id=session_id,
@@ -436,7 +784,7 @@ class ChatService:
         prepared = self._formatter.prepare_messages(
             job.messages,
             response_format=job.response_format,
-            merge_system_into_user=True,
+            merge_system_into_user=not bool(job.tools),
         )
         loop = asyncio.get_running_loop()
 
@@ -462,6 +810,7 @@ class ChatService:
                     temperature=job.temperature,
                     tools=job.tools,
                     tool_choice=job.tool_choice,
+                    max_tokens=job.max_tokens,
                 )
             else:
                 upstream_name = f"ollama-local ({job.model})"
@@ -475,6 +824,7 @@ class ChatService:
                     temperature=job.temperature,
                     tools=job.tools,
                     tool_choice=job.tool_choice,
+                    max_tokens=job.max_tokens,
                 )
 
             success = await asyncio.wait_for(
@@ -599,10 +949,12 @@ class ChatService:
         temperature: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
     ) -> bool:
         """Web AI sağlayıcısını çalıştırır; ulaşılamazsa yerel Ollama yedek modeline düşer."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
         tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
+        reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
         web_model_name = web_def.web_model or "openai-fast"
 
         success = await asyncio.to_thread(
@@ -616,6 +968,8 @@ class ChatService:
             tools,
             tool_choice,
             tools_cb,
+            reasoning_cb,
+            max_tokens,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -629,6 +983,8 @@ class ChatService:
                 tools,
                 tool_choice,
                 tools_cb,
+                reasoning_cb,
+                max_tokens,
             )
         if success:
             return True
@@ -648,6 +1004,8 @@ class ChatService:
                 tools,
                 tool_choice,
                 tools_cb,
+                reasoning_cb,
+                max_tokens,
             )
         return False
 
@@ -662,10 +1020,12 @@ class ChatService:
         temperature: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
     ) -> bool:
         """Yerel Ollama modelinden akış alır; Ollama kapalıysa otomatik olarak Web AI köprüsünü kullanır."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
         tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
+        reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
         success = await asyncio.to_thread(
             self._llm_provider.stream_from_ollama,
             model_id,
@@ -676,6 +1036,8 @@ class ChatService:
             tools,
             tool_choice,
             tools_cb,
+            reasoning_cb,
+            max_tokens,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -688,6 +1050,8 @@ class ChatService:
                 tools,
                 tool_choice,
                 tools_cb,
+                reasoning_cb,
+                max_tokens,
             )
         if success:
             return True
@@ -703,6 +1067,8 @@ class ChatService:
             tools,
             tool_choice,
             tools_cb,
+            reasoning_cb,
+            max_tokens,
         )
 
     @staticmethod
@@ -719,6 +1085,21 @@ class ChatService:
             ).result(timeout=10)
 
         return _on_delta
+
+    @staticmethod
+    def _create_threadsafe_reasoning_callback(
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+    ) -> Callable[[str], None]:
+        """Senkron HTTP okuma iş parçacığından asyncio kuyruğuna güvenli reasoning (düşünce) gönderen callback döner."""
+        def _on_reasoning(text: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                channel.put({"event": "reasoning", "text": text, "session_id": session_id}),
+                loop,
+            ).result(timeout=10)
+
+        return _on_reasoning
 
     @staticmethod
     def _create_threadsafe_tool_calls_callback(

@@ -1,3 +1,8 @@
+/**
+ * ThinkPort AI Gateway - Sohbet Oturumları ve Geçmişi Servisi (conversationService.ts).
+ * SQLite üzerinde saklanan sohbet oturumları (chat_conversations), mesajlar (chat_messages),
+ * ekli dosya kayıtları (chat_message_attachments) ve SSE anlık olay akışı için önyüz servisi.
+ */
 import {
   ChatMessageItemDTO,
   ConversationDetailDTO,
@@ -11,6 +16,14 @@ import { deleteJson, getJson, patchJson, postJson } from './httpClient';
 export interface ConversationAuthOptions {
   requesterUserId?: string;
   apiKey?: string;
+}
+
+export interface ConversationRealtimeEventDTO {
+  event: 'connected' | 'conversation_updated';
+  action?: string;
+  conversation_id?: string;
+  revision?: number;
+  ts?: string;
 }
 
 function buildAuthHeaders(auth?: ConversationAuthOptions): Record<string, string> {
@@ -38,6 +51,7 @@ export const conversationService = {
       search?: string;
       searchField?: string;
       isArchived?: boolean;
+      isDeleted?: boolean;
       sortField?: string;
       sortOrder?: 'asc' | 'desc';
       page?: number;
@@ -52,6 +66,10 @@ export const conversationService = {
     if (params?.search?.trim()) query.set('search', params.search.trim());
     if (params?.searchField) query.set('aramaTipi', params.searchField);
     if (params?.isArchived !== undefined) query.set('arsivdekiler', String(params.isArchived));
+    if (params?.isDeleted !== undefined) {
+      query.set('silinmisleriGetir', String(params.isDeleted));
+      query.set('silinenler', String(params.isDeleted));
+    }
     if (params?.sortField) query.set('sortField', params.sortField);
     if (params?.sortOrder) query.set('sortOrder', params.sortOrder);
     if (params?.page) query.set('page', String(params.page));
@@ -99,13 +117,27 @@ export const conversationService = {
     );
   },
 
-  /** Sohbet oturumunu ve altındaki tüm mesaj/dosya kayıtlarını veritabanından siler. */
+  /** Sohbet oturumunu çöp kutusuna taşır (soft delete) veya permanent=true ise kalıcı olarak siler. */
   async deleteConversation(
     conversationId: string,
-    auth?: ConversationAuthOptions
+    auth?: ConversationAuthOptions,
+    permanent?: boolean
   ): Promise<{ status: string; id: string }> {
+    const qs = permanent ? '?permanent=true' : '';
     return deleteJson<{ status: string; id: string }>(
+      `/admin/conversations/${conversationId}${qs}`,
+      buildAuthHeaders(auth)
+    );
+  },
+
+  /** Çöp kutusundaki sohbet oturumunu aktif listeye geri yükler. */
+  async restoreConversation(
+    conversationId: string,
+    auth?: ConversationAuthOptions
+  ): Promise<ConversationSummaryDTO> {
+    return patchJson<UpdateConversationRequestDTO, ConversationSummaryDTO>(
       `/admin/conversations/${conversationId}`,
+      { is_deleted: false, is_archived: false },
       buildAuthHeaders(auth)
     );
   },
@@ -131,13 +163,84 @@ export const conversationService = {
     );
   },
 
+  /**
+   * AI Sohbet Stüdyosu listesinin yeni gelen API/Stüdyo sohbetlerini ve mesajlarını
+   * anlık (real-time) olarak yakalaması için SSE (/admin/conversations/events) bağlantısı açar.
+   */
+  subscribeToConversationEvents(
+    onEvent: (event: ConversationRealtimeEventDTO) => void,
+    onConnectionChange?: (connected: boolean) => void
+  ): () => void {
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+      onConnectionChange?.(false);
+      return () => { };
+    }
+
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let isClosed = false;
+
+    const connect = () => {
+      if (isClosed) return;
+      try {
+        eventSource = new EventSource('/admin/conversations/events');
+        eventSource.onopen = () => {
+          onConnectionChange?.(true);
+        };
+        eventSource.onmessage = (msg) => {
+          if (!msg.data) return;
+          try {
+            const parsed = JSON.parse(msg.data) as ConversationRealtimeEventDTO;
+            if (parsed?.event === 'connected') {
+              onConnectionChange?.(true);
+            } else if (parsed?.event === 'conversation_updated') {
+              onEvent(parsed);
+            }
+          } catch {
+            // Geçersiz JSON satırını yoksay
+          }
+        };
+        eventSource.onerror = () => {
+          onConnectionChange?.(false);
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          if (!isClosed && !reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              connect();
+            }, 3000);
+          }
+        };
+      } catch {
+        onConnectionChange?.(false);
+      }
+    };
+
+    connect();
+
+    return () => {
+      isClosed = true;
+      onConnectionChange?.(false);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    };
+  },
+
   /** Veritabanı mesaj kaydını (ConversationMessageRecordDTO) arayüz mesaj nesnesine (ChatMessageItemDTO) dönüştürür. */
   mapRecordToChatMessageItem(record: ConversationMessageRecordDTO): ChatMessageItemDTO {
     const timeLabel = record.created_at
       ? new Date(record.created_at).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        })
+        hour: '2-digit',
+        minute: '2-digit',
+      })
       : '';
 
     const metaParts: string[] = [];
@@ -165,13 +268,13 @@ export const conversationService = {
       attachments:
         record.attachments && record.attachments.length > 0
           ? record.attachments.map((att) => ({
-              id: att.id,
-              name: att.file_name,
-              size: att.file_size,
-              mimeType: att.mime_type,
-              kind: att.file_kind,
-              estimatedTokens: att.estimated_tokens,
-            }))
+            id: att.id,
+            name: att.file_name,
+            size: att.file_size,
+            mimeType: att.mime_type,
+            kind: att.file_kind,
+            estimatedTokens: att.estimated_tokens,
+          }))
           : undefined,
     };
   },

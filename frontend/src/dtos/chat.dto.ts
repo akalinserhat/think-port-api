@@ -47,6 +47,9 @@ export interface ChatCompletionResponseDTO {
     message: {
       role: string;
       content: string;
+      reasoning_content?: string;
+      thinking?: string;
+      tool_calls?: Record<string, unknown>[];
     };
     finish_reason?: string;
   }[];
@@ -66,6 +69,8 @@ export interface ChatCompletionChunkDTO {
     delta: {
       role?: string;
       content?: string;
+      reasoning_content?: string;
+      tool_calls?: Record<string, unknown>[];
     };
     finish_reason?: string | null;
   }[];
@@ -108,6 +113,9 @@ export interface ConversationMessageRecordDTO {
   model_id: string;
   provider: string;
   content: string;
+  thinking_content?: string;
+  tool_calls_json?: string;
+  raw_payload_json?: string;
   attachments: MessageAttachmentRecordDTO[];
   prompt_tokens: number;
   completion_tokens: number;
@@ -130,6 +138,7 @@ export interface ConversationSummaryDTO {
   source: 'studio' | 'api';
   is_pinned: boolean;
   is_archived: boolean;
+  is_deleted?: boolean;
   total_messages: number;
   total_tokens: number;
   attachment_names: string[];
@@ -156,4 +165,5 @@ export interface UpdateConversationRequestDTO {
   system_prompt?: string;
   is_pinned?: boolean;
   is_archived?: boolean;
+  is_deleted?: boolean;
 }

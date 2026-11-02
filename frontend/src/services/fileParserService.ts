@@ -48,11 +48,11 @@ export const fileParserService = {
     return postJson<ParseFileRequestDTO, ParseFileResponseDTO>('/admin/parse-file', dto);
   },
 
-  /** Tek bir File nesnesini işleyerek ChatAttachmentDTO nesnesine dönüştürür. */
+  /** Tek bir File nesnesini ön-parse işlemine sokmadan doğrudan ham ek (Data URL / Base64) olarak ChatAttachmentDTO nesnesine dönüştürür. */
   async createAttachmentFromFile(file: File): Promise<ChatAttachmentDTO> {
     const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const dataUrl = await this.readFileAsDataUrl(file);
     if (file.type.startsWith('image/')) {
-      const dataUrl = await this.readFileAsDataUrl(file);
       return {
         id,
         name: file.name,
@@ -63,31 +63,13 @@ export const fileParserService = {
       };
     }
 
-    const dataUrl = await this.readFileAsDataUrl(file);
-    let extractedText = '';
-    let estimatedTokens = 0;
-
-    try {
-      const parsed = await this.parseDocumentOnServer({
-        filename: file.name,
-        mime_type: file.type || 'application/octet-stream',
-        base64_data: dataUrl,
-      });
-      extractedText = parsed.extracted_text || '';
-      estimatedTokens = parsed.estimated_tokens || 0;
-    } catch {
-      extractedText = await this.readFileAsText(file);
-      estimatedTokens = this.estimateTokens(extractedText);
-    }
-
     return {
       id,
       name: file.name,
       size: file.size,
-      mimeType: file.type || 'text/plain',
+      mimeType: file.type || 'application/octet-stream',
       kind: 'document',
-      extractedText,
-      estimatedTokens,
+      dataUrl,
     };
   },
 };

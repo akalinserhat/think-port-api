@@ -33,6 +33,8 @@ class ChatMessageDTO(BaseModel):
 
     role: Literal["system", "user", "assistant", "developer", "tool"]
     content: Optional[Union[str, List[Dict[str, Any]]]] = ""
+    reasoning_content: Optional[str] = None
+    thinking: Optional[str] = None
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
@@ -106,10 +108,11 @@ class ChatCompletionResponseDTO(BaseModel):
 
 
 class DeltaMessageDTO(BaseModel):
-    """SSE akışındaki (streaming) anlık içerik farkı (delta) DTO'su."""
+    """SSE akışındaki (streaming) anlık içerik ve düşünce farkı (delta) DTO'su."""
 
     role: Optional[Literal["assistant"]] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
@@ -149,6 +152,7 @@ class ChatJobDTO(BaseModel):
     job_id: str
     conversation_id: str
     user_message_id: str
+    assistant_message_id: Optional[str] = None
     source: Literal["studio", "api"] = "api"
     user_id: str
     provider: str
@@ -166,7 +170,7 @@ class ChatJobDTO(BaseModel):
 class StreamEventDTO(BaseModel):
     """Asenkron yayın kuyruğundaki tek bir olayı temsil eden DTO."""
 
-    event: Literal["delta", "done", "error", "tool_calls"]
+    event: Literal["delta", "reasoning", "done", "error", "tool_calls"]
     text: str = ""
     session_id: str = "sess-gpt-01"
     tool_calls: Optional[List[Dict[str, Any]]] = None

@@ -42,8 +42,17 @@ export const chatService = {
           file_name: att.name,
           mime_type: att.mimeType,
           file_size: att.size,
-          estimated_tokens: att.estimatedTokens || 0,
-          content: att.extractedText || '',
+          ...(att.dataUrl
+            ? {
+              file_data: att.dataUrl,
+              file: {
+                filename: att.name,
+                file_data: att.dataUrl,
+              },
+            }
+            : {}),
+          ...(att.extractedText ? { content: att.extractedText } : {}),
+          ...(att.estimatedTokens ? { estimated_tokens: att.estimatedTokens } : {}),
         });
       }
     }
@@ -78,20 +87,33 @@ export const chatService = {
     return apiMessages;
   },
 
-  /** Tek bir SSE 'data: ...' satırından delta metnini ve varsa conversation_id değerini ayrıştırır. */
-  parseChunkFromSseLine(line: string): { delta: string | null; conversationId?: string } {
+  /** Tek bir SSE 'data: ...' satırından delta metnini, reasoning metnini, tool_calls dizisini ve conversation_id değerini ayrıştırır. */
+  parseChunkFromSseLine(line: string): {
+    delta: string | null;
+    reasoningDelta: string | null;
+    toolCallsDelta: Record<string, unknown>[] | null;
+    conversationId?: string;
+    requestId?: string;
+  } {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') {
-      return { delta: null };
+      return { delta: null, reasoningDelta: null, toolCallsDelta: null };
     }
     try {
       const parsed: ChatCompletionChunkDTO = JSON.parse(trimmed.slice(6));
+      const d = parsed.choices?.[0]?.delta;
       return {
-        delta: parsed.choices?.[0]?.delta?.content || null,
+        delta: d?.content !== undefined && d?.content !== null && d.content !== '' ? String(d.content) : null,
+        reasoningDelta:
+          d?.reasoning_content !== undefined && d?.reasoning_content !== null && d.reasoning_content !== ''
+            ? String(d.reasoning_content)
+            : null,
+        toolCallsDelta: Array.isArray(d?.tool_calls) && d.tool_calls.length > 0 ? d.tool_calls : null,
         conversationId: parsed.conversation_id,
+        requestId: parsed.id,
       };
     } catch {
-      return { delta: null };
+      return { delta: null, reasoningDelta: null, toolCallsDelta: null };
     }
   },
 
@@ -140,13 +162,16 @@ export const chatService = {
     return pieces;
   },
 
-  /** SSE akışlı (stream=true) sohbet tamamlama isteği gönderir ve her delta parçasını callback'e iletir. */
+  /** SSE akışlı (stream=true) sohbet tamamlama isteği gönderir ve her delta/reasoning/tool_calls parçasını callback'e iletir. */
   async streamCompletion(
     dto: ChatCompletionRequestDTO,
     apiKey: string,
     onDelta: (deltaText: string) => void,
     onConversationId?: (conversationId: string) => void,
-    xUserId?: string
+    xUserId?: string,
+    onReasoning?: (reasoningText: string) => void,
+    onToolCalls?: (toolCalls: Record<string, unknown>[]) => void,
+    onRequestId?: (requestId: string) => void
   ): Promise<void> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -180,6 +205,7 @@ export const chatService = {
     const decoder = new TextDecoder();
     let sseBuffer = '';
     let notifiedConvId = Boolean(headerConvId);
+    let notifiedReqId = false;
 
     const emitDeltaSmoothly = async (rawDelta: string, hasMultipleInBatch: boolean) => {
       const pieces = this.splitIntoTypewriterPieces(rawDelta);
@@ -200,10 +226,21 @@ export const chatService = {
 
       const deltasInRead: string[] = [];
       for (const line of lines) {
-        const { delta, conversationId } = this.parseChunkFromSseLine(line);
+        const { delta, reasoningDelta, toolCallsDelta, conversationId, requestId } =
+          this.parseChunkFromSseLine(line);
         if (!notifiedConvId && conversationId && onConversationId) {
           notifiedConvId = true;
           onConversationId(conversationId);
+        }
+        if (!notifiedReqId && requestId && onRequestId) {
+          notifiedReqId = true;
+          onRequestId(requestId);
+        }
+        if (reasoningDelta && onReasoning) {
+          onReasoning(reasoningDelta);
+        }
+        if (toolCallsDelta && onToolCalls) {
+          onToolCalls(toolCallsDelta);
         }
         if (delta) {
           deltasInRead.push(delta);
@@ -216,9 +253,19 @@ export const chatService = {
     }
 
     if (sseBuffer.trim()) {
-      const { delta, conversationId } = this.parseChunkFromSseLine(sseBuffer);
+      const { delta, reasoningDelta, toolCallsDelta, conversationId, requestId } =
+        this.parseChunkFromSseLine(sseBuffer);
       if (!notifiedConvId && conversationId && onConversationId) {
         onConversationId(conversationId);
+      }
+      if (!notifiedReqId && requestId && onRequestId) {
+        onRequestId(requestId);
+      }
+      if (reasoningDelta && onReasoning) {
+        onReasoning(reasoningDelta);
+      }
+      if (toolCallsDelta && onToolCalls) {
+        onToolCalls(toolCallsDelta);
       }
       if (delta) {
         await emitDeltaSmoothly(delta, false);

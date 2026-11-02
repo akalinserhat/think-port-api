@@ -1,7 +1,13 @@
+"""
+ThinkPort AI Gateway - LLM Sağlayıcı İletişim Servisi (llm_provider_service.py).
+Web AI (Pollinations / OpenAI Web Bridge) ve yerel Ollama büyük dil modeli sağlayıcılarıyla
+HTTP/SSE akışını, yedek (fallback) geçişlerini ve tool_calls ayrıştırmasını yürütür.
+"""
 import http.client
 import json
+import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from app.core.config import settings
 from app.core.logger import gateway_logger
 from app.core.security import create_verified_ssl_context
@@ -25,6 +31,8 @@ class LlmProviderService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
+        max_tokens: Optional[int] = None,
     ) -> bool:
         """Yerel Ollama /v1/chat/completions uç noktasından gerçek zamanlı SSE akışı okur."""
         t0 = time.perf_counter()
@@ -41,6 +49,7 @@ class LlmProviderService:
                 temperature=temperature,
                 tools=tools,
                 tool_choice=tool_choice,
+                max_tokens=max_tokens,
             )
             conn.request(
                 "POST",
@@ -60,6 +69,7 @@ class LlmProviderService:
                 on_delta,
                 max_duration_sec=float(settings.ollama_timeout_sec),
                 on_tool_calls=on_tool_calls,
+                on_reasoning=on_reasoning,
             )
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
@@ -83,16 +93,21 @@ class LlmProviderService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
+        max_tokens: Optional[int] = None,
     ) -> bool:
         """
         Web AI sağlayıcısından (text.pollinations.ai/openai) gerçek zamanlı SSE akışı okur.
         HTTP Chunked Transfer-Encoding uyumlu 'resp.readline()' kullanarak parçalanmış
         JSON satırlarını kayıpsız birleştirir.
         """
-        enriched_messages = self._inject_persona_if_needed(openai_messages, requested_model_id)
+        enriched_messages = self._inject_persona_if_needed(
+            openai_messages,
+            requested_model_id,
+        )
         enriched_messages = MessageFormatterService.ensure_web_messages_have_system_and_json_directives(
             enriched_messages,
-            response_format=response_format,
+            response_format=None if tools else response_format,
         )
         target_upstream = (
             "openai-fast"
@@ -100,9 +115,21 @@ class LlmProviderService:
             else web_model
         )
 
+        # Eğer mesaj geçmişinde 'tool' veya 'tool_calls' varsa (MCP 2. adım), Web AI köprüsünün
+        # ham tool mesajlarını HTTP 400 ile reddetmemesi için doğrudan düzleştirilmiş mesajlarla başla
+        has_tool_history = any(
+            m.get("role") == "tool" or bool(m.get("tool_calls"))
+            for m in enriched_messages
+        )
+        effective_messages = (
+            self._flatten_tool_messages_for_web(enriched_messages)
+            if has_tool_history
+            else enriched_messages
+        )
+
         if self._try_pollinations_openai_endpoint(
             target_upstream,
-            enriched_messages,
+            effective_messages,
             on_delta,
             requested_model_id,
             response_format=response_format,
@@ -110,12 +137,14 @@ class LlmProviderService:
             tools=tools,
             tool_choice=tool_choice,
             on_tool_calls=on_tool_calls,
+            on_reasoning=on_reasoning,
+            max_tokens=max_tokens,
         ):
             return True
 
         return self._try_pollinations_root_endpoint(
             target_upstream,
-            enriched_messages,
+            effective_messages,
             on_delta,
             requested_model_id,
             response_format=response_format,
@@ -132,62 +161,276 @@ class LlmProviderService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
+        max_tokens: Optional[int] = None,
+        _retry_count: int = 0,
     ) -> bool:
         """text.pollinations.ai/openai uç noktasından chunked-safe SSE veya JSON yanıtı okur."""
         t0 = time.perf_counter()
-        context = create_verified_ssl_context()
-        conn = http.client.HTTPSConnection(
-            settings.pollinations_host,
-            443,
-            timeout=settings.pollinations_timeout_sec,
-            context=context,
+        effort = (
+            "low"
+            if bool(tools)
+            else ("high" if requested_model_id == "deepseek-r1" else "low")
         )
-        try:
-            payload = self._build_stream_payload(
-                model_name,
-                openai_messages,
-                reasoning_effort="high" if requested_model_id == "deepseek-r1" else "low",
-                response_format=response_format,
-                temperature=temperature,
-                tools=tools,
-                tool_choice=tool_choice,
+
+        def _execute_single_pollinations_call(
+            msgs: List[Dict[str, Any]],
+            call_tools_cb: Optional[Callable[[List[Dict[str, Any]]], None]],
+            call_delta_cb: Callable[[str], None],
+            seed_offset: int = 0,
+            retry_idx: int = 0,
+        ) -> bool:
+            context = create_verified_ssl_context()
+            conn = http.client.HTTPSConnection(
+                settings.pollinations_host,
+                443,
+                timeout=settings.pollinations_timeout_sec,
+                context=context,
             )
-            conn.request(
-                "POST",
-                "/openai",
-                body=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream, application/json",
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-                },
-            )
-            resp = conn.getresponse()
-            if resp.status != 200:
-                gateway_logger.warning(
-                    f"Web AI (/openai) HTTP {resp.status} döndü | model={requested_model_id or model_name}"
+            try:
+                payload = self._build_stream_payload(
+                    model_name,
+                    msgs,
+                    reasoning_effort=effort,
+                    response_format=response_format,
+                    temperature=temperature,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    max_tokens=None,
+                    seed=((int(time.time() * 1000) + seed_offset) % 900000) + 100000,
+                    force_stream=True,
+                )
+                conn.request(
+                    "POST",
+                    "/openai",
+                    body=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "text/event-stream, application/json",
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                    },
+                )
+                resp = conn.getresponse()
+                if resp.status != 200:
+                    err_body = resp.read().decode("utf-8", errors="replace")[:500]
+                    gateway_logger.warning(
+                        f"Web AI (/openai) HTTP {resp.status} döndü | model={requested_model_id or model_name} | detay={err_body}"
+                    )
+                    if resp.status in (402, 429) and retry_idx == 0:
+                        m_wait = re.search(r"Retry after (\d+)s", err_body)
+                        wait_sec = min(int(m_wait.group(1)) + 2, 48) if m_wait else 15
+                        gateway_logger.info(
+                            f"Web AI (/openai) hız sınırına (HTTP {resp.status}) takıldı, {wait_sec}s beklenip tekrar denenecek..."
+                        )
+                        conn.close()
+                        time.sleep(wait_sec)
+                        return _execute_single_pollinations_call(
+                            msgs, call_tools_cb, call_delta_cb, seed_offset + 7, retry_idx=1
+                        )
+                    return False
+                return self._consume_sse_or_json(
+                    resp,
+                    self._extract_web_delta,
+                    call_delta_cb,
+                    max_duration_sec=float(settings.web_gateway_timeout_sec),
+                    on_tool_calls=call_tools_cb,
+                    on_reasoning=on_reasoning if seed_offset == 0 else None,
+                )
+            except Exception as exc:
+                elapsed_err = int((time.perf_counter() - t0) * 1000)
+                gateway_logger.error(
+                    f"Web AI (/openai) bağlantı hatası | istem={requested_model_id} | upstream={model_name} | süre={elapsed_err}ms | hata={exc}"
                 )
                 return False
-            ok = self._consume_sse_or_json(
-                resp,
-                self._extract_web_delta,
-                on_delta,
-                max_duration_sec=float(settings.web_gateway_timeout_sec),
-                on_tool_calls=on_tool_calls,
-            )
+            finally:
+                conn.close()
+
+        if not tools or not on_tool_calls:
+            ok = _execute_single_pollinations_call(openai_messages, on_tool_calls, on_delta)
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
                 f"Web AI (/openai) akışı tamamlandı | istem={requested_model_id} | upstream={model_name} | ok={ok} | süre={elapsed_ms}ms"
             )
             return ok
-        except Exception as exc:
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            gateway_logger.error(
-                f"Web AI (/openai) bağlantı hatası | istem={requested_model_id} | upstream={model_name} | süre={elapsed_ms}ms | hata={exc}"
-            )
+
+        first_chunk_tcs: List[Dict[str, Any]] = []
+        ok = _execute_single_pollinations_call(
+            openai_messages,
+            lambda tcs: first_chunk_tcs.extend(tcs),
+            on_delta,
+        )
+        if not ok:
             return False
-        finally:
-            conn.close()
+
+        if not first_chunk_tcs:
+            return True
+
+        primary_tc = first_chunk_tcs[0]
+        fn_obj = primary_tc.get("function") or {}
+        tc_name = str(fn_obj.get("name") or "")
+        raw_args = str(fn_obj.get("arguments") or "")
+
+        parsed_obj, is_complete, array_key, last_cut_name = self._parse_or_salvage_tool_args(raw_args)
+        if parsed_obj is None or not array_key:
+            if parsed_obj is not None:
+                primary_tc["function"]["arguments"] = json.dumps(parsed_obj, ensure_ascii=False)
+            on_tool_calls(first_chunk_tcs)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            gateway_logger.info(
+                f"Web AI (/openai) tek parçada tool_calls tamamlandı | araç={tc_name} | süre={elapsed_ms}ms"
+            )
+            return True
+
+        doc_msg_idx: int = -1
+        doc_pre: str = ""
+        doc_header: str = ""
+        doc_text: str = ""
+        doc_footer: str = ""
+        doc_post: str = ""
+        for m_idx in range(len(openai_messages) - 1, -1, -1):
+            if openai_messages[m_idx].get("role") == "user":
+                u_content = str(openai_messages[m_idx].get("content") or "")
+                m_doc = re.search(
+                    r"(---\s*\[Ekli Dosya:[^\]]+\]\s*---\r?\n)([\s\S]+?)(\r?\n---\s*\[Dosya Sonu[^\]]*\]\s*---)",
+                    u_content,
+                )
+                if m_doc:
+                    doc_msg_idx = m_idx
+                    doc_pre = u_content[: m_doc.start()]
+                    doc_header = m_doc.group(1)
+                    doc_text = m_doc.group(2)
+                    doc_footer = m_doc.group(3)
+                    doc_post = u_content[m_doc.end() :]
+                    break
+
+        initial_items = parsed_obj.get(array_key) or []
+        last_valid_item: Optional[Dict[str, Any]] = (
+            initial_items[-1] if initial_items and isinstance(initial_items[-1], dict) else None
+        )
+        doc_offset = (
+            self._find_resume_offset_in_doc(doc_text, 0, last_cut_name, last_valid_item)
+            if len(doc_text) > 5000
+            else len(doc_text)
+        )
+
+        if is_complete and (len(doc_text) <= 5000 or (len(doc_text) - doc_offset) < 2200):
+            primary_tc["function"]["arguments"] = json.dumps(parsed_obj, ensure_ascii=False)
+            on_tool_calls(first_chunk_tcs)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            gateway_logger.info(
+                f"Web AI (/openai) tek parçada tool_calls tamamlandı | araç={tc_name} | süre={elapsed_ms}ms"
+            )
+            return True
+
+        merged_doc: Dict[str, Any] = parsed_obj
+        all_items: List[Dict[str, Any]] = []
+        seen_titles: List[str] = []
+
+        def _collect_chunk_items(items_list: List[Dict[str, Any]]) -> Tuple[int, Optional[Dict[str, Any]]]:
+            added = 0
+            last_it: Optional[Dict[str, Any]] = None
+            for it in items_list:
+                if not isinstance(it, dict):
+                    continue
+                last_it = it
+                nm = str(it.get("adi") or it.get("kampanyaAdi") or it.get("baslik") or it.get("name") or it.get("kod") or "").strip()
+                if nm and nm not in seen_titles:
+                    seen_titles.append(nm)
+                if array_key == "kampanyalar":
+                    rules = it.get("kurallar") or it.get("rules")
+                    if isinstance(rules, list) and len(rules) == 0:
+                        continue
+                if nm and any(
+                    str(x.get("adi") or x.get("kampanyaAdi") or x.get("baslik") or x.get("name") or x.get("kod") or "").strip().lower() == nm.lower()
+                    for x in all_items
+                ):
+                    continue
+                all_items.append(it)
+                added += 1
+            return added, last_it
+
+        _collect_chunk_items(initial_items)
+        gateway_logger.info(
+            f"Web AI (/openai) çok parçalı tool_calls birleştirme | Parça 1: {len(all_items)} geçerli kayıt alındı | kesilen={last_cut_name} | doc_offset={doc_offset}/{len(doc_text)}"
+        )
+
+        for cont_idx in range(1, 4):
+            if (time.perf_counter() - t0) > 120.0:
+                break
+            done_list_str = ", ".join(f"'{n}'" for n in seen_titles)
+            if doc_msg_idx != -1 and len(doc_text) > 5000 and doc_offset > 0:
+                sliced_doc = (
+                    doc_text[:850]
+                    + "\n\n... [ÖNCEKİ SAYFALAR İŞLENDİ - KALINAN BÖLÜMDEN DEVAMI]: ...\n\n"
+                    + doc_text[doc_offset:]
+                )
+                sliced_user_content = (
+                    f"{doc_pre}"
+                    f"[ÖNEMLİ DEVAM YÖNERGESİ: Önceki adımda şu başlıklar işlendi: {done_list_str}. "
+                    f"Önceki başlıkları tekrar etmeden, aşağıda kalınan yerden devam eden belge metnindeki TÜM geçerli kampanya ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' aracıyla çıkar.]\n\n"
+                    f"{doc_header}{sliced_doc}{doc_footer}{doc_post}"
+                )
+                cont_messages = list(openai_messages)
+                cont_messages[doc_msg_idx] = {"role": "user", "content": sliced_user_content}
+            else:
+                if last_cut_name:
+                    start_clause = f"dokümanda yarım kalan '{last_cut_name}' başlığından başlayarak "
+                elif seen_titles:
+                    start_clause = f"dokümanda '{seen_titles[-1]}' başlığından hemen sonraki kampanya/bölümden başlayarak "
+                else:
+                    start_clause = "dokümanda kaldığın yerden devam ederek "
+
+                cont_prompt = (
+                    f"Önceki adımda çıktı token sınırından dolayı yalnızca şu {len(seen_titles)} başlık işlenebildi: [{done_list_str}].\n"
+                    f"Şimdi önceki başlıkları ASLA tekrar etmeden, {start_clause}"
+                    f"dokümanda henüz çıkarılmamış GERİ KALAN tüm geçerli kampanya ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' aracıyla çıkar."
+                )
+                cont_messages = list(openai_messages) + [{"role": "user", "content": cont_prompt}]
+
+            cont_tcs: List[Dict[str, Any]] = []
+            cont_ok = _execute_single_pollinations_call(
+                cont_messages,
+                lambda tcs: cont_tcs.extend(tcs),
+                lambda _: None,
+                seed_offset=cont_idx * 101,
+            )
+            if not cont_ok or not cont_tcs:
+                break
+            cont_raw_args = str((cont_tcs[0].get("function") or {}).get("arguments") or "")
+            cont_parsed, cont_complete, _, last_cut_name = self._parse_or_salvage_tool_args(cont_raw_args)
+            if not cont_parsed:
+                break
+            chunk_items = cont_parsed.get(array_key) or []
+            added_count, chunk_last_it = _collect_chunk_items(chunk_items)
+            if len(doc_text) > 5000:
+                new_offset = self._find_resume_offset_in_doc(doc_text, doc_offset, last_cut_name, chunk_last_it)
+            else:
+                new_offset = doc_offset
+            gateway_logger.info(
+                f"Web AI (/openai) çok parçalı tool_calls birleştirme | Parça {cont_idx + 1}: +{added_count} yeni kayıt (toplam={len(all_items)}) | tam={cont_complete} | kesilen={last_cut_name} | doc_offset={new_offset}/{len(doc_text)}"
+            )
+            if len(doc_text) > 5000:
+                if new_offset <= doc_offset and added_count == 0:
+                    break
+                doc_offset = new_offset
+                if (len(doc_text) - doc_offset) < 2200 or (cont_complete and not last_cut_name):
+                    break
+            else:
+                if cont_complete or not last_cut_name or added_count == 0:
+                    break
+
+        if array_key == "kampanyalar":
+            for idx_k, k_obj in enumerate(all_items, 1):
+                if isinstance(k_obj, dict):
+                    k_obj["kodu"] = f"KMP-{idx_k:02d}"
+        merged_doc[array_key] = all_items
+        primary_tc["function"]["arguments"] = json.dumps(merged_doc, ensure_ascii=False)
+        on_tool_calls([primary_tc])
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        gateway_logger.info(
+            f"Web AI (/openai) çok parçalı tool_calls tamamlandı | araç={tc_name} | toplam_kayıt={len(all_items)} | süre={elapsed_ms}ms"
+        )
+        return True
 
     def _try_pollinations_root_endpoint(
         self,
@@ -304,20 +547,203 @@ class LlmProviderService:
         Seçilen Web Gateway modeline göre uygun sistem yönergesini ekler,
         böylece yanıtlar akıcı, doğal ve seçilen model kimliğiyle tutarlı olur.
         """
+        if any(m.get("role") == "system" for m in messages):
+            return messages
+
         persona_map = {
             "gpt-4o": "Sen OpenAI GPT-4o modelisin. Kullanıcının dilinde (Türkçe ise akıcı, doğru ve anlaşılır Türkçe ile) doğrudan ve eksiksiz yanıt ver.",
             "claude-3-5-sonnet": "Sen Anthropic Claude 3.5 Sonnet modelisin. Analitik, özenli, doğal ve akıcı bir dille doğrudan yanıt ver.",
             "deepseek-r1": "Sen DeepSeek R1 modelisin. Mantıksal ve yapılandırılmış biçimde, kullanıcının dilinde net yanıt ver.",
             "gemini-2.5-pro": "Sen Google Gemini 2.5 Pro modelisin. Kullanıcının dilinde (Türkçe ise akıcı ve özenli Türkçe ile) kapsamlı, net ve doğrudan yanıt ver.",
         }
-        persona = persona_map.get(requested_model_id)
-        if not persona:
-            return messages
-
-        has_system = any(m.get("role") == "system" for m in messages)
-        if has_system:
-            return messages
+        persona = persona_map.get(
+            requested_model_id,
+            f"Sen {requested_model_id or 'yapay zeka'} modelisin. Kullanıcının dilinde doğrudan ve eksiksiz yanıt ver.",
+        )
         return [{"role": "system", "content": persona}] + list(messages)
+
+    @staticmethod
+    def _flatten_tool_messages_for_web(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Bazı Web AI uç noktaları geçmişte `role: 'tool'` veya `tool_calls` dizisi bulunduğunda
+        HTTP 400/402 döndürebilir. Bu yardımcı metot, geçmişteki araç çağrısı ve araç yanıtı
+        mesajlarını standart `assistant` ve `user` metin mesajlarına dönüştürür.
+        """
+        flattened: List[Dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role", "user")
+            if role == "assistant" and m.get("tool_calls"):
+                tc_descriptions: List[str] = []
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    fn_name = fn.get("name", "tool")
+                    fn_args = fn.get("arguments", "{}")
+                    tc_descriptions.append(f"[Çağrılan Araç: {fn_name}({fn_args})]")
+                content_str = str(m.get("content") or "").strip()
+                combined = "\n".join(p for p in [content_str] + tc_descriptions if p)
+                flattened.append({"role": "assistant", "content": combined or "[Araç çağrısı yapıldı]"})
+            elif role == "tool":
+                tool_name = m.get("name") or "tool"
+                tool_content = str(m.get("content") or "")
+                flattened.append(
+                    {
+                        "role": "user",
+                        "content": f"[ARAÇ ÇALIŞTIRMA SONUCU ({tool_name})]:\n{tool_content}\n\nYukarıdaki araç sonucunu ve önceki belge verilerini kullanarak asıl görevi tamamla ve gerekli hedef aracı (örn: erp_create_document) çağır.",
+                    }
+                )
+            else:
+                clean_copy = {
+                    k: v
+                    for k, v in m.items()
+                    if k not in ("tool_calls", "tool_call_id", "name")
+                }
+                flattened.append(clean_copy)
+        return flattened
+
+    @classmethod
+    def _find_resume_offset_in_doc(
+        cls,
+        doc_text: str,
+        current_offset: int,
+        last_cut_name: Optional[str],
+        last_item: Optional[Dict[str, Any]],
+    ) -> int:
+        """
+        Çok sayfalı bir belgede bir önceki parçanın kaldığı karakter konumunu (offset) hesaplar.
+        Öncelikle yarıda kesilen başlık adını (last_cut_name) arar; yoksa son tamamlanan
+        kaydın alfanümerik model kodlarını (kuralAlani == 1) veya başlığını baz alır.
+        """
+        doc_norm = doc_text.replace("’", "'").replace("‘", "'")
+        if last_cut_name:
+            cut_norm = last_cut_name.strip().replace("’", "'").replace("‘", "'")
+            pos = doc_norm.find(cut_norm, current_offset)
+            if pos != -1 and pos > current_offset:
+                return max(current_offset + 100, pos - 60)
+
+        best_pos = current_offset
+        if last_item:
+            rules = last_item.get("kurallar") or last_item.get("rules") or []
+            for r in reversed(rules):
+                if not isinstance(r, dict):
+                    continue
+                alan = r.get("kuralAlani") or r.get("field") or 1
+                try:
+                    if int(alan) != 1:
+                        continue
+                except Exception:
+                    continue
+                val = str(r.get("kuralDegeri") or "")
+                tokens = [
+                    t.strip()
+                    for t in val.split(",")
+                    if re.match(r"^[A-Z0-9]{5,}$", t.strip())
+                ]
+                for tok in reversed(tokens):
+                    pos = doc_text.find(tok, current_offset, current_offset + 8500)
+                    if pos != -1:
+                        best_pos = max(best_pos, pos + len(tok))
+                        break
+                if best_pos > current_offset:
+                    break
+            if best_pos == current_offset:
+                nm = (
+                    str(last_item.get("adi") or last_item.get("kampanyaAdi") or "")
+                    .strip()
+                    .replace("’", "'")
+                    .replace("‘", "'")
+                )
+                if nm:
+                    pos = doc_norm.find(nm, current_offset, current_offset + 8500)
+                    if pos != -1:
+                        best_pos = max(best_pos, pos + len(nm) + 350)
+        return best_pos
+
+    @classmethod
+    def _repair_llm_json_glitches(cls, s: str) -> str:
+        """LLM tarafından üretilen tool_calls JSON dizgesindeki yaygın sözdizimi hatalarını onarır."""
+        s = re.sub(r'([,{]\s*"[^"]+")\s*,\s*(?=")', r"\1:null,", s)
+        s = re.sub(r'(:\s*(?:-?\d+(?:\.\d+)?|true|false|null))"\s*(?=[,}\]])', r"\1", s)
+        s = re.sub(r'("[^"\\]*(?:\\.[^"\\]*)*")\s*\]\s*(?=,\s*"[^"]+"\s*:)', r"\1", s)
+        s = re.sub(
+            r'\}\s*\]\s*,\s*(?="(?:kodu|kod|adi|ad|kampanyaKodu|kampanyaAdi)"\s*:)',
+            "}]},{",
+            s,
+        )
+        return s
+
+    @classmethod
+    def _parse_or_salvage_tool_args(
+        cls, raw_args: str
+    ) -> Tuple[Optional[Dict[str, Any]], bool, Optional[str], Optional[str]]:
+        """
+        Tool argümanı JSON dizgesini ayrıştırır. Eğer upstream token sınırından dolayı yarıda
+        kesilmişse, tamamlanmış tüm dizi elemanlarını kurtarır ve yarım kalan elemanın adını döner.
+        Dönüş: (parsed_dict, is_complete, array_key, cut_off_name)
+        """
+        cleaned = cls._repair_llm_json_glitches(raw_args.strip())
+        if not cleaned:
+            return None, True, None, None
+
+        has_ellipsis = "..." in cleaned[-80:] or '".."' in cleaned[-60:]
+        if not has_ellipsis:
+            try:
+                obj = json.loads(cleaned)
+                if isinstance(obj, dict):
+                    for k in ("kampanyalar", "kalemler", "items", "satirlar", "fiyatlar", "urunler"):
+                        if isinstance(obj.get(k), list):
+                            return obj, True, k, None
+                    return obj, True, None, None
+            except Exception:
+                pass
+
+        m = re.search(r'"(kampanyalar|kalemler|items|satirlar|fiyatlar|urunler)"\s*:\s*\[', cleaned)
+        if not m:
+            return None, False, None, None
+
+        arr_key = m.group(1)
+        arr_start = m.end()
+        header_prefix = cleaned[: m.start()].rstrip().rstrip(",")
+
+        decoder = json.JSONDecoder()
+        complete_items: List[Dict[str, Any]] = []
+        idx = arr_start
+        n = len(cleaned)
+        last_good_end = arr_start
+
+        while idx < n:
+            while idx < n and cleaned[idx] in " \t\r\n,":
+                idx += 1
+            if idx >= n or cleaned[idx] == "]":
+                break
+            if cleaned[idx] != "{":
+                break
+            try:
+                item_obj, next_idx = decoder.raw_decode(cleaned, idx)
+                if isinstance(item_obj, dict):
+                    item_str = cleaned[idx:next_idx]
+                    if "..." in item_str or '".."' in item_str:
+                        break
+                    complete_items.append(item_obj)
+                last_good_end = next_idx
+                idx = next_idx
+            except Exception:
+                break
+
+        remainder = cleaned[last_good_end:]
+        cut_off_name = None
+        m_name = re.search(r'"(?:adi|kampanyaAdi|baslik|name|title)"\s*:\s*"([^"]+)"', remainder)
+        if m_name:
+            cut_off_name = m_name.group(1)
+
+        try:
+            header_obj = json.loads(header_prefix + "}")
+        except Exception:
+            header_obj = {"documentType": "KampanyaBelgesi", "isDraft": True}
+
+        header_obj[arr_key] = complete_items
+        return header_obj, False, arr_key, cut_off_name
 
     @staticmethod
     def _build_stream_payload(
@@ -328,12 +754,15 @@ class LlmProviderService:
         temperature: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        max_tokens: Optional[int] = None,
+        seed: Optional[int] = None,
+        force_stream: bool = False,
     ) -> bytes:
-        """OpenAI uyumlu istek gövdesini JSON bytes olarak hazırlar. tools varsa senkron JSON (stream: False) modunda çalışır."""
+        """OpenAI uyumlu istek gövdesini JSON bytes olarak hazırlar."""
         body: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "stream": False if tools else True,
+            "stream": True if force_stream else (False if tools else True),
         }
         if tools:
             body["tools"] = tools
@@ -343,6 +772,12 @@ class LlmProviderService:
             body["reasoning_effort"] = reasoning_effort
         if temperature is not None:
             body["temperature"] = temperature
+        if seed is not None:
+            body["seed"] = seed
+        if max_tokens is not None and max_tokens > 0:
+            body["max_tokens"] = min(max(int(max_tokens), 8192) if tools else int(max_tokens), 16384)
+        elif tools and not force_stream:
+            body["max_tokens"] = 16384
         if MessageFormatterService.is_json_mode_requested(response_format):
             body["response_format"] = {"type": "json_object"}
         return json.dumps(body).encode("utf-8")
@@ -355,18 +790,22 @@ class LlmProviderService:
         on_delta: Callable[[str], None],
         max_duration_sec: float = 90.0,
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
         HTTP yanıtını 'resp.readline()' üzerinden (HTTP chunked transfer encoding
         kod çözümü uygulanmış şekilde) satır satır okur ve her delta parçasını iletir.
-        Eğer model yalnızca reasoning alanı döndürürse onu da yedek olarak yakalar.
+        Modelin ürettiği tüm düşünce (reasoning / reasoning_content / thinking) parçalarını
+        hiçbir karakter kaybetmeden on_reasoning geri çağırımına aktarır.
         Model tool_calls üretmişse on_tool_calls geri çağırımını tetikler.
         Üst zaman aşımı (`max_duration_sec`) aşıldığında akışı sonlandırır.
         """
         t_start = time.perf_counter()
         received_content = False
+        received_reasoning = False
         non_sse_lines: List[str] = []
         reasoning_buffer: List[str] = []
+        streamed_tool_calls_by_idx: Dict[int, Dict[str, Any]] = {}
 
         while True:
             if (time.perf_counter() - t_start) > max_duration_sec:
@@ -389,55 +828,109 @@ class LlmProviderService:
                     break
                 try:
                     chunk = json.loads(data_str)
-                    delta_obj = chunk.get("choices", [{}])[0].get("delta", {})
-                    tc = delta_obj.get("tool_calls")
-                    if tc and on_tool_calls:
-                        on_tool_calls(tc)
+                    choice0 = chunk.get("choices", [{}])[0] if chunk.get("choices") else {}
+                    delta_obj = choice0.get("delta") or choice0.get("message") or {}
+
+                    reasoning_piece = (
+                        delta_obj.get("reasoning")
+                        or delta_obj.get("reasoning_content")
+                        or delta_obj.get("thinking")
+                    )
+                    if reasoning_piece:
+                        r_str = str(reasoning_piece)
+                        reasoning_buffer.append(r_str)
+                        received_reasoning = True
+                        if on_reasoning:
+                            on_reasoning(r_str)
+
+                    tc_list = delta_obj.get("tool_calls")
+                    if tc_list and isinstance(tc_list, list):
+                        for tc_idx, tc_item in enumerate(tc_list):
+                            if not isinstance(tc_item, dict):
+                                continue
+                            idx_key = int(tc_item.get("index", tc_idx))
+                            existing_tc = streamed_tool_calls_by_idx.get(idx_key)
+                            if not existing_tc:
+                                fn_in = tc_item.get("function") or {}
+                                streamed_tool_calls_by_idx[idx_key] = {
+                                    "id": tc_item.get("id") or f"call_{idx_key}",
+                                    "type": tc_item.get("type") or "function",
+                                    "function": {
+                                        "name": str(fn_in.get("name") or ""),
+                                        "arguments": str(fn_in.get("arguments") or ""),
+                                    },
+                                }
+                            else:
+                                if tc_item.get("id"):
+                                    existing_tc["id"] = tc_item["id"]
+                                fn_in = tc_item.get("function") or {}
+                                if fn_in.get("name"):
+                                    existing_tc["function"]["name"] += str(fn_in["name"])
+                                if fn_in.get("arguments"):
+                                    existing_tc["function"]["arguments"] += str(fn_in["arguments"])
                         received_content = True
+
                     content = delta_extractor(chunk)
                     if content:
                         received_content = True
                         on_delta(content)
-                    else:
-                        reasoning_piece = delta_obj.get("reasoning") or delta_obj.get("reasoning_content")
-                        if reasoning_piece:
-                            reasoning_buffer.append(reasoning_piece)
                 except Exception:
                     continue
             else:
                 non_sse_lines.append(line)
 
-        if received_content:
-            return True
+        if streamed_tool_calls_by_idx and on_tool_calls:
+            ordered_tcs = [
+                streamed_tool_calls_by_idx[k]
+                for k in sorted(streamed_tool_calls_by_idx.keys())
+            ]
+            on_tool_calls(ordered_tcs)
 
-        if reasoning_buffer:
-            on_delta("".join(reasoning_buffer))
+        if received_content:
             return True
 
         if non_sse_lines:
             joined = "\n".join(non_sse_lines).strip()
             try:
                 parsed = json.loads(joined)
-                choice = parsed.get("choices", [{}])[0]
+                choice = parsed.get("choices", [{}])[0] if parsed.get("choices") else {}
+                msg_obj = choice.get("message") or choice.get("delta") or {}
+                got_content_or_tools = False
+
+                msg_reasoning = (
+                    msg_obj.get("reasoning")
+                    or msg_obj.get("reasoning_content")
+                    or msg_obj.get("thinking")
+                )
+                if msg_reasoning and on_reasoning:
+                    on_reasoning(str(msg_reasoning))
+
+                msg_content = msg_obj.get("content") or delta_extractor(parsed)
+                if msg_content:
+                    on_delta(str(msg_content))
+                    got_content_or_tools = True
+
                 tool_calls = (
                     choice.get("message", {}).get("tool_calls")
                     or choice.get("delta", {}).get("tool_calls")
                 )
                 if tool_calls and on_tool_calls:
                     on_tool_calls(tool_calls)
-                    return True
-                msg_content = (
-                    choice.get("message", {}).get("content")
-                    or delta_extractor(parsed)
-                )
-                if msg_content:
-                    on_delta(msg_content)
+                    got_content_or_tools = True
+
+                if got_content_or_tools:
                     return True
             except Exception:
                 if len(joined) > 0 and not joined.startswith("<"):
                     on_delta(joined)
                     return True
 
+        if reasoning_buffer and not on_reasoning:
+            on_delta("".join(reasoning_buffer))
+            return True
+
+        # Eğer yalnızca reasoning alındıysa ama asıl yanıt (content veya tool_calls) hiç gelmediyse
+        # False döndür ki üst katman yedek (fallback) uç noktadan tam yanıtı çeksin.
         return False
 
     @staticmethod

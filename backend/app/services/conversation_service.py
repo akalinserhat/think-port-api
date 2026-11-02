@@ -5,10 +5,11 @@ from app.dtos.conversation_dto import (
     ConversationDetailDTO,
     ConversationSummaryDTO,
     CreateConversationRequestDTO,
+    RecordTurnRequestDTO,
     UpdateConversationRequestDTO,
 )
 from app.repositories.api_key_repository import ApiKeyRepository
-from app.repositories.conversation_repository import ConversationRepository
+from app.repositories.conversation_repository import ConversationRepository, conversation_event_broadcaster
 from app.repositories.user_repository import UserRepository
 
 
@@ -40,6 +41,7 @@ class ConversationService:
         search: Optional[str] = None,
         search_field: Optional[str] = None,
         is_archived: bool = False,
+        is_deleted: bool = False,
         sort_field: Optional[str] = None,
         sort_order: str = "desc",
         page: int = 1,
@@ -61,6 +63,7 @@ class ConversationService:
             search=search,
             search_field=search_field,
             is_archived=is_archived,
+            is_deleted=is_deleted,
             sort_field=sort_field,
             sort_order=sort_order,
             limit=page_size,
@@ -120,17 +123,58 @@ class ConversationService:
         conversation_id: str,
         authorization: Optional[str] = None,
         x_user_id: Optional[str] = None,
+        permanent: bool = False,
     ) -> dict:
-        """Sohbet oturumunu ve altındaki tüm mesaj/dosya kayıtlarını yetki kontrolüyle siler."""
+        """Sohbet oturumunu yetki kontrolüyle çöp kutusuna taşır (soft delete) veya kalıcı olarak siler."""
         existing = self._conversation_repo.get_conversation_summary(conversation_id)
         if not existing:
             raise resource_not_found_error("Silinecek sohbet oturumu bulunamadı.")
         self._assert_conversation_access(existing.user_id, authorization, x_user_id)
 
-        deleted = self._conversation_repo.delete_conversation(conversation_id)
+        deleted = self._conversation_repo.delete_conversation(
+            conversation_id, permanent=permanent
+        )
         if not deleted:
             raise resource_not_found_error("Silinecek sohbet oturumu bulunamadı.")
         return {"status": "deleted", "id": conversation_id}
+
+    def restore_conversation_or_404(
+        self,
+        conversation_id: str,
+        authorization: Optional[str] = None,
+        x_user_id: Optional[str] = None,
+    ) -> ConversationSummaryDTO:
+        """Çöp kutusundaki sohbet oturumunu yetki kontrolüyle aktif listeye geri yükler."""
+        existing = self._conversation_repo.get_conversation_summary(conversation_id)
+        if not existing:
+            raise resource_not_found_error("Geri yüklenecek sohbet oturumu bulunamadı.")
+        self._assert_conversation_access(existing.user_id, authorization, x_user_id)
+
+        restored = self._conversation_repo.restore_conversation(conversation_id)
+        if not restored:
+            raise resource_not_found_error("Geri yüklenecek sohbet oturumu bulunamadı.")
+        return restored
+
+    def record_turn(
+        self,
+        dto: RecordTurnRequestDTO,
+        authorization: Optional[str] = None,
+        x_user_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Sohbet Stüdyosu veya harici istemciden gelen turu idempotent olarak (request_id kontrolüyle)
+        veritabanına kaydeder; zaten ChatService tarafından kaydedilmişse mevcut kaydı korur.
+        """
+        from app.repositories import sqlite_cli_bridge
+
+        payload = dto.model_dump()
+        payload["authorization"] = authorization or ""
+        payload["x_user_id"] = x_user_id or ""
+        res = sqlite_cli_bridge.record_turn(payload)
+        conv_id = res.get("conversation_id")
+        if conv_id:
+            conversation_event_broadcaster.publish("message_appended", str(conv_id))
+        return res
 
     def _assert_conversation_access(
         self,

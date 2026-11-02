@@ -1,9 +1,8 @@
 import React, { useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ExternalLink, RefreshCw, Sparkles, Home, Users } from 'lucide-react';
+import { ExternalLink, Home, Users } from 'lucide-react';
 import {
-  BaseButton,
   Breadcrumb,
   type BreadcrumbItem,
   DrawerMenu,
@@ -16,9 +15,6 @@ import { ActiveTab, SupportedLanguage, SystemUserRecordDTO } from '../dtos';
 interface TopAppBarProps {
   activeTab: ActiveTab;
   onSelectTab?: (tab: ActiveTab) => void;
-  modelCount: number;
-  isBusy: boolean;
-  onRefresh: () => void;
   currentAuthUser?: SystemUserRecordDTO | null;
   onLogout?: () => void;
 }
@@ -26,9 +22,6 @@ interface TopAppBarProps {
 export const TopAppBar: React.FC<TopAppBarProps> = ({
   activeTab,
   onSelectTab,
-  modelCount,
-  isBusy,
-  onRefresh,
   currentAuthUser,
   onLogout,
 }) => {
@@ -144,75 +137,11 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
       <div className="header-top-row">
         {headerContent && <div className="header-custom-actions">{headerContent}</div>}
 
-        <div className="header-search-container" style={{ maxWidth: '560px', flex: 1 }}>
-          <GlobalSearch allowMultipleFilterTypes={true} />
+        <div className="header-search-container">
+          <GlobalSearch className="header-main-search" allowMultipleFilterTypes={true} />
         </div>
 
-        <div className="header-right" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          {/* Active Models / Busy Status Pill */}
-          <div
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '6px 12px',
-              borderRadius: '999px',
-              background: 'var(--surface-secondary)',
-              border: '1px solid var(--glass-border)',
-              fontSize: '12px',
-              fontWeight: 600,
-              color: 'var(--text-secondary)',
-            }}
-          >
-            <span
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                background: isBusy ? 'var(--warning)' : 'var(--success)',
-              }}
-            />
-            <span style={{ fontFamily: 'monospace', fontSize: '11px' }}>
-              {isBusy ? t('status.generating') : t('status.activeModels', { count: modelCount })}
-            </span>
-          </div>
-
-          {/* Chat Studio Shortcut Button */}
-          {activeTab !== 'chat' && onSelectTab && (
-            <button
-              type="button"
-              className="btn-header-ai"
-              onClick={() => onSelectTab('chat')}
-              title={t('nav.chat')}
-            >
-              <Sparkles size={15} />
-              <span>{t('nav.chat')}</span>
-            </button>
-          )}
-
-          {/* Refresh State Button */}
-          <BaseButton
-            variant="outline"
-            className="btn-sm"
-            icon={<RefreshCw size={15} />}
-            text=""
-            title="Yenile / Refresh"
-            onClick={onRefresh}
-            style={{ padding: '0 10px', minWidth: '36px' }}
-          />
-
-          {/* OpenAPI Docs Button */}
-          <a
-            href="/docs"
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-outline btn-sm"
-            style={{ textDecoration: 'none' }}
-          >
-            <span>OpenAPI</span>
-            <ExternalLink size={14} />
-          </a>
-
+        <div className="header-right">
           {/* @akalin/ui DrawerMenu for User Profile, Theme & Language */}
           <DrawerMenu
             user={{

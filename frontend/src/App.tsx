@@ -513,9 +513,6 @@ export const App: React.FC = () => {
     [adminState, effectiveUsers]
   );
 
-  const idleCount = adminState.browser_sessions.filter((s) => s.status === 'idle').length;
-  const isBusy = isGenerating || idleCount < adminState.browser_sessions.length;
-
   if (!currentAuthUser || location.pathname === '/login') {
     return <LoginView onLoginSuccess={handleLoginSuccess} />;
   }
@@ -536,12 +533,6 @@ export const App: React.FC = () => {
       <div className="main-content">
         <TopAppBar
           activeTab={activeTab}
-          modelCount={adminState.models.length}
-          isBusy={isBusy}
-          onRefresh={() => {
-            refreshState();
-            refreshSystemUsers();
-          }}
           onSelectTab={handleSelectTab}
           currentAuthUser={currentAuthUser}
           onLogout={handleLogout}

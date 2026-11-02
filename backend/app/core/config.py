@@ -16,15 +16,15 @@ class AppConfig:
     )
     ollama_host: str = os.getenv("OLLAMA_HOST", "127.0.0.1")
     ollama_port: int = int(os.getenv("OLLAMA_PORT", "11434"))
-    ollama_timeout_sec: int = int(os.getenv("OLLAMA_TIMEOUT_SEC", "90"))
+    ollama_timeout_sec: int = int(os.getenv("OLLAMA_TIMEOUT_SEC", "240"))
     ollama_discovery_timeout_sec: float = float(os.getenv("OLLAMA_DISCOVERY_TIMEOUT_SEC", "2.0"))
     pollinations_host: str = "text.pollinations.ai"
-    pollinations_timeout_sec: int = int(os.getenv("POLLINATIONS_TIMEOUT_SEC", "30"))
-    web_gateway_timeout_sec: int = int(os.getenv("WEB_GATEWAY_TIMEOUT_SEC", "90"))
+    pollinations_timeout_sec: int = int(os.getenv("POLLINATIONS_TIMEOUT_SEC", "120"))
+    web_gateway_timeout_sec: int = int(os.getenv("WEB_GATEWAY_TIMEOUT_SEC", "180"))
     hf_flux_space_url: str = "https://black-forest-labs-flux-1-schnell.hf.space"
     stable_horde_base_url: str = "https://stablehorde.net/api/v2"
     max_extracted_document_chars: int = 60000
-    stream_wait_timeout_sec: int = int(os.getenv("STREAM_WAIT_TIMEOUT_SEC", "95"))
+    stream_wait_timeout_sec: int = int(os.getenv("STREAM_WAIT_TIMEOUT_SEC", "185"))
     model_discovery_cache_ttl_sec: float = float(os.getenv("MODEL_DISCOVERY_CACHE_TTL_SEC", "15.0"))
     external_openai_base_url: str = os.getenv("EXTERNAL_OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL", ""))
     external_openai_api_key: str = os.getenv("EXTERNAL_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))

@@ -1,3 +1,7 @@
+"""
+ThinkPort AI Gateway - Web Arayüzü Yönlendiricisi (ui_router.py).
+Derlenmiş React arayüzünü (frontend/dist/index.html) önbelleksiz (no-store) başlıklarla sunar.
+"""
 from pathlib import Path
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
@@ -6,6 +10,12 @@ from app.core.config import settings
 router = APIRouter(tags=["Web UI Dashboard"])
 
 FALLBACK_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "dashboard_fallback.html"
+
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 
 def _load_dashboard_html() -> str:
@@ -31,5 +41,5 @@ def _load_dashboard_html() -> str:
 @router.get("/settings", response_class=HTMLResponse)
 @router.get("/settings/{subpath:path}", response_class=HTMLResponse)
 async def serve_admin_dashboard(subpath: str = "") -> HTMLResponse:
-    """Yönetim ve AI Sohbet Konsolu web arayüzünü sunar."""
-    return HTMLResponse(content=_load_dashboard_html())
+    """Yönetim ve AI Sohbet Konsolu web arayüzünü önbelleksiz olarak sunar."""
+    return HTMLResponse(content=_load_dashboard_html(), headers=NO_CACHE_HEADERS)

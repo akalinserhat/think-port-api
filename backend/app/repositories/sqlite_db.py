@@ -1,3 +1,8 @@
+"""
+ThinkPort AI Gateway - SQLite Veritabanı Bağlantı, Şema ve Başlangıç Verisi Yöneticisi (sqlite_db.py).
+WAL (Write-Ahead Logging), busy_timeout ve synchronous=NORMAL optimizasyonlarıyla yoğun eşzamanlı
+okuma/yazma yüklerinde kilitlenme yaşanmadan ilişkisel veri bütünlüğünü sağlar.
+"""
 from __future__ import annotations
 import hashlib
 import sqlite3
@@ -59,6 +64,7 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
     source TEXT NOT NULL DEFAULT 'studio',
     is_pinned INTEGER NOT NULL DEFAULT 0,
     is_archived INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
     total_messages INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -74,6 +80,9 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     model_id TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
+    thinking_content TEXT NOT NULL DEFAULT '',
+    tool_calls_json TEXT NOT NULL DEFAULT '',
+    raw_payload_json TEXT NOT NULL DEFAULT '',
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -272,25 +281,27 @@ class SqliteDatabaseManager:
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        """Thread-safe, Row fabrikalı ve WAL modlu SQLite bağlantı bağlamı döner."""
+        """Thread-safe, Row fabrikalı ve WAL/busy_timeout optimizasyonlu SQLite bağlantı bağlamı döner."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
-        try:
-            with self._lock:
+        with self._lock:
+            conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA busy_timeout = 10000;")
+                conn.execute("PRAGMA foreign_keys = ON;")
+                conn.execute("PRAGMA synchronous = NORMAL;")
                 yield conn
                 conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def _initialize_database(self) -> None:
         """Tabloları, tekil kullanıcı migrasyonunu, benzersizlik indekslerini ve başlangıç (seed) verilerini oluşturur."""
         with self.connection() as conn:
+            conn.execute("PRAGMA journal_mode = WAL;")
             conn.executescript(SCHEMA_SQL)
             self._migrate_to_single_users_table(conn)
             self._seed_default_users_if_empty(conn)
@@ -325,6 +336,150 @@ class SqliteDatabaseManager:
             conn.execute("ALTER TABLE user_token_allocations ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         if "updated_at" not in alloc_cols:
             conn.execute("ALTER TABLE user_token_allocations ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+
+        conv_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(chat_conversations)").fetchall()
+        }
+        if "is_deleted" not in conv_cols:
+            conn.execute("ALTER TABLE chat_conversations ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+
+        msg_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+        }
+        if "thinking_content" not in msg_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN thinking_content TEXT NOT NULL DEFAULT ''")
+        if "tool_calls_json" not in msg_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN tool_calls_json TEXT NOT NULL DEFAULT ''")
+        if "raw_payload_json" not in msg_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT ''")
+
+        # Mevcut mesaj kayıtlarındaki <think>...</think> bloklarını, araç çağrılarını ve telemetri özetlerini geri doldur (Backfill)
+        import json as _json
+        import re as _re
+        legacy_msgs = conn.execute(
+            """
+            SELECT m.id, m.conversation_id, m.request_id, m.role, m.model_id, m.provider,
+                   m.content, m.thinking_content, m.tool_calls_json, m.raw_payload_json,
+                   m.prompt_tokens, m.completion_tokens, m.total_tokens, m.latency_ms, m.ttft_ms,
+                   m.status, m.error_detail, m.created_at,
+                   c.system_prompt, c.source
+            FROM chat_messages m
+            LEFT JOIN chat_conversations c ON c.id = m.conversation_id
+            WHERE m.thinking_content = '' AND m.raw_payload_json = ''
+            """
+        ).fetchall()
+        for lm in legacy_msgs:
+            raw_c = lm["content"] or ""
+            think_parts = _re.findall(r"<think(?:ing)?[^>]*>([\s\S]*?)</think(?:ing)?>", raw_c, flags=_re.IGNORECASE)
+            extracted_think = "\n\n".join(p.strip() for p in think_parts if p.strip())
+            tc_json_str = lm["tool_calls_json"] or ""
+            tc_match = _re.match(r"^\[Araç Çağrısı:\s*(.+?)\]$", raw_c.strip())
+            if tc_match and not tc_json_str:
+                fn_names = [n.strip() for n in tc_match.group(1).split(",") if n.strip()]
+                tc_json_str = _json.dumps(
+                    [
+                        {
+                            "id": f"call_legacy_{idx + 1}",
+                            "type": "function",
+                            "function": {
+                                "name": fn,
+                                "arguments": "{}",
+                            },
+                        }
+                        for idx, fn in enumerate(fn_names)
+                    ],
+                    ensure_ascii=False,
+                )
+            atts = conn.execute(
+                "SELECT file_name, file_kind, mime_type, file_size, estimated_tokens FROM chat_message_attachments WHERE message_id = ?",
+                (lm["id"],),
+            ).fetchall()
+            att_list_dicts = [dict(a) for a in atts]
+            ulog = None
+            if lm["request_id"]:
+                ulog = conn.execute(
+                    "SELECT session_id, is_stream, upstream_provider, prompt_preview, response_preview FROM usage_logs WHERE request_id = ?",
+                    (lm["request_id"],),
+                ).fetchone()
+            direction = "OUTGOING_REQUEST" if lm["role"] in ("user", "system", "developer", "tool") else "INCOMING_RESPONSE"
+            raw_payload = {
+                "direction": direction,
+                "request_id": lm["request_id"] or "",
+                "conversation_id": lm["conversation_id"],
+                "source": lm["source"] or "studio",
+                "role": lm["role"],
+                "model": lm["model_id"],
+                "provider": lm["provider"] or (ulog["upstream_provider"] if ulog else ""),
+                "session_id": ulog["session_id"] if ulog else "",
+                "is_stream": bool(ulog["is_stream"]) if ulog else True,
+                "system_prompt": lm["system_prompt"] or "",
+                "attachments": att_list_dicts,
+                "content_length_chars": len(raw_c),
+                "content": raw_c,
+                "thinking_extracted": extracted_think,
+                "tool_calls": _json.loads(tc_json_str) if tc_json_str else [],
+                "metrics": {
+                    "prompt_tokens": lm["prompt_tokens"],
+                    "completion_tokens": lm["completion_tokens"],
+                    "total_tokens": lm["total_tokens"],
+                    "latency_ms": lm["latency_ms"],
+                    "ttft_ms": lm["ttft_ms"],
+                    "status": lm["status"],
+                    "error_detail": lm["error_detail"] or "",
+                },
+                "timestamp": lm["created_at"],
+            }
+            trace_lines = []
+            if lm["role"] in ("user", "system", "developer", "tool"):
+                trace_lines.append(f"📤 [GIDEN LLM İSTEĞİ / OUTGOING PAYLOAD] (Rol: {lm['role']} | Model: {lm['model_id']} | Kaynak: {lm['source'] or 'studio'})")
+                if lm["request_id"]:
+                    trace_lines.append(f"• İstek ID (Request ID): {lm['request_id']}")
+                if lm["system_prompt"]:
+                    trace_lines.append(f"• Sistem Yönergesi (System Prompt): {lm['system_prompt']}")
+                if att_list_dicts:
+                    att_summary = ", ".join(
+                        f"{a['file_name']} ({a['file_kind']}, {a['file_size']} bayt, ~{a['estimated_tokens']} token)"
+                        for a in att_list_dicts
+                    )
+                    trace_lines.append(f"• Ekli Dosyalar ({len(att_list_dicts)} adet): {att_summary}")
+                trace_lines.append(f"• Gönderilen Karakter Sayısı: {len(raw_c)} karakter | Girdi Token: {lm['prompt_tokens']} token")
+            else:
+                if extracted_think:
+                    trace_lines.append("🧠 [LLM DÜŞÜNCE SÜRECİ / INTERNAL REASONING]")
+                    trace_lines.append(extracted_think)
+                    trace_lines.append("---")
+                trace_lines.append(
+                    f"📥 [GELEN LLM YANITI / INCOMING PAYLOAD] (Model: {lm['model_id']} | Sağlayıcı: {lm['provider'] or (ulog['upstream_provider'] if ulog else 'gateway')})"
+                )
+                if lm["request_id"]:
+                    trace_lines.append(f"• İstek ID: {lm['request_id']}" + (f" | Oturum: {ulog['session_id']}" if ulog and ulog["session_id"] else ""))
+                trace_lines.append(
+                    f"• Telemetri: Girdi={lm['prompt_tokens']} tok | Çıktı={lm['completion_tokens']} tok | Toplam={lm['total_tokens']} tok | TTFT={lm['ttft_ms']} ms | Süre={lm['latency_ms']} ms | Durum={lm['status']}"
+                )
+                trace_lines.append(f"• Ham Yanıt Uzunluğu: {len(raw_c)} karakter")
+                if tc_json_str:
+                    trace_lines.append(f"• Tetiklenen Araç Çağrıları (tool_calls): {tc_json_str}")
+                if lm["error_detail"]:
+                    trace_lines.append(f"• Hata Detayı: {lm['error_detail']}")
+
+            final_thinking = "\n".join(trace_lines)
+            conn.execute(
+                """
+                UPDATE chat_messages
+                SET thinking_content = ?,
+                    tool_calls_json = ?,
+                    raw_payload_json = ?
+                WHERE id = ?
+                """,
+                (
+                    final_thinking,
+                    tc_json_str,
+                    _json.dumps(raw_payload, ensure_ascii=False),
+                    lm["id"],
+                ),
+            )
 
         has_legacy_sys = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='system_users'"
