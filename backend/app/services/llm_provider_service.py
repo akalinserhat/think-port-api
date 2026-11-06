@@ -269,8 +269,11 @@ class LlmProviderService:
         fn_obj = primary_tc.get("function") or {}
         tc_name = str(fn_obj.get("name") or "")
         raw_args = str(fn_obj.get("arguments") or "")
+        expected_doc_type = self._infer_expected_doc_type(openai_messages)
 
-        parsed_obj, is_complete, array_key, last_cut_name = self._parse_or_salvage_tool_args(raw_args)
+        parsed_obj, is_complete, array_key, last_cut_name = self._parse_or_salvage_tool_args(
+            raw_args, fallback_doc_type=expected_doc_type
+        )
         if parsed_obj is None or not array_key:
             if parsed_obj is not None:
                 primary_tc["function"]["arguments"] = json.dumps(parsed_obj, ensure_ascii=False)
@@ -326,6 +329,19 @@ class LlmProviderService:
         all_items: List[Dict[str, Any]] = []
         seen_titles: List[str] = []
 
+        def _extract_item_key(item_dict: Dict[str, Any]) -> str:
+            return str(
+                item_dict.get("adi")
+                or item_dict.get("kampanyaAdi")
+                or item_dict.get("baslik")
+                or item_dict.get("name")
+                or item_dict.get("tedarikciUrunKodu")
+                or item_dict.get("urunKodu")
+                or item_dict.get("stokKodu")
+                or item_dict.get("kod")
+                or ""
+            ).strip()
+
         def _collect_chunk_items(items_list: List[Dict[str, Any]]) -> Tuple[int, Optional[Dict[str, Any]]]:
             added = 0
             last_it: Optional[Dict[str, Any]] = None
@@ -333,7 +349,7 @@ class LlmProviderService:
                 if not isinstance(it, dict):
                     continue
                 last_it = it
-                nm = str(it.get("adi") or it.get("kampanyaAdi") or it.get("baslik") or it.get("name") or it.get("kod") or "").strip()
+                nm = _extract_item_key(it)
                 if nm and nm not in seen_titles:
                     seen_titles.append(nm)
                 if array_key == "kampanyalar":
@@ -341,7 +357,11 @@ class LlmProviderService:
                     if isinstance(rules, list) and len(rules) == 0:
                         continue
                 if nm and any(
-                    str(x.get("adi") or x.get("kampanyaAdi") or x.get("baslik") or x.get("name") or x.get("kod") or "").strip().lower() == nm.lower()
+                    _extract_item_key(x).lower() == nm.lower()
+                    and (
+                        array_key != "kalemler"
+                        or x.get("fiyat") == it.get("fiyat")
+                    )
                     for x in all_items
                 ):
                     continue
@@ -366,24 +386,24 @@ class LlmProviderService:
                 )
                 sliced_user_content = (
                     f"{doc_pre}"
-                    f"[ÖNEMLİ DEVAM YÖNERGESİ: Önceki adımda şu başlıklar işlendi: {done_list_str}. "
-                    f"Önceki başlıkları tekrar etmeden, aşağıda kalınan yerden devam eden belge metnindeki TÜM geçerli kampanya ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' aracıyla çıkar.]\n\n"
+                    f"[ÖNEMLİ DEVAM YÖNERGESİ: Önceki adımda şu kayıtlar işlendi: {done_list_str}. "
+                    f"Önceki kayıtları tekrar etmeden, aşağıda kalınan yerden devam eden belge metnindeki TÜM geçerli kayıt ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' (documentType: '{expected_doc_type}') aracıyla çıkar.]\n\n"
                     f"{doc_header}{sliced_doc}{doc_footer}{doc_post}"
                 )
                 cont_messages = list(openai_messages)
                 cont_messages[doc_msg_idx] = {"role": "user", "content": sliced_user_content}
             else:
                 if last_cut_name:
-                    start_clause = f"dokümanda yarım kalan '{last_cut_name}' başlığından başlayarak "
+                    start_clause = f"dokümanda yarım kalan '{last_cut_name}' kaydından başlayarak "
                 elif seen_titles:
-                    start_clause = f"dokümanda '{seen_titles[-1]}' başlığından hemen sonraki kampanya/bölümden başlayarak "
+                    start_clause = f"dokümanda '{seen_titles[-1]}' kaydından hemen sonraki satır/bölümden başlayarak "
                 else:
                     start_clause = "dokümanda kaldığın yerden devam ederek "
 
                 cont_prompt = (
-                    f"Önceki adımda çıktı token sınırından dolayı yalnızca şu {len(seen_titles)} başlık işlenebildi: [{done_list_str}].\n"
-                    f"Şimdi önceki başlıkları ASLA tekrar etmeden, {start_clause}"
-                    f"dokümanda henüz çıkarılmamış GERİ KALAN tüm geçerli kampanya ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' aracıyla çıkar."
+                    f"Önceki adımda çıktı token sınırından dolayı yalnızca şu {len(seen_titles)} kayıt işlenebildi: [{done_list_str}].\n"
+                    f"Şimdi önceki kayıtları ASLA tekrar etmeden, {start_clause}"
+                    f"dokümanda henüz çıkarılmamış GERİ KALAN tüm geçerli kayıt ve tabloları (son sayfaya kadar eksiksiz) '{tc_name}' (documentType: '{expected_doc_type}') aracıyla çıkar."
                 )
                 cont_messages = list(openai_messages) + [{"role": "user", "content": cont_prompt}]
 
@@ -397,9 +417,14 @@ class LlmProviderService:
             if not cont_ok or not cont_tcs:
                 break
             cont_raw_args = str((cont_tcs[0].get("function") or {}).get("arguments") or "")
-            cont_parsed, cont_complete, _, last_cut_name = self._parse_or_salvage_tool_args(cont_raw_args)
+            cont_parsed, cont_complete, _, last_cut_name = self._parse_or_salvage_tool_args(
+                cont_raw_args, fallback_doc_type=expected_doc_type
+            )
             if not cont_parsed:
                 break
+            for hk in ("baslangicTarihi", "bitisTarihi", "hakedisSonTarihi", "aciklama", "adi", "cariUnvan", "kdvOrani", "kdvDahilMi"):
+                if hk in cont_parsed and cont_parsed[hk] is not None and hk not in merged_doc:
+                    merged_doc[hk] = cont_parsed[hk]
             chunk_items = cont_parsed.get(array_key) or []
             added_count, chunk_last_it = _collect_chunk_items(chunk_items)
             if len(doc_text) > 5000:
@@ -603,6 +628,25 @@ class LlmProviderService:
         return flattened
 
     @classmethod
+    def _infer_expected_doc_type(cls, messages: List[Dict[str, Any]]) -> str:
+        """Mesaj geçmişindeki sistem istemi veya hedef şema bildiriminden beklenen belge türünü çözümler."""
+        for m in messages:
+            content = str(m.get("content") or "")
+            m_schema = re.search(
+                r"\[HEDEF BELGE RESMİ JSON ŞEMASI\s*\(\s*([A-Za-z0-9_]+)",
+                content,
+            )
+            if m_schema:
+                return m_schema.group(1).strip()
+            m_doc = re.search(
+                r'documentType\s*["\']?\s*:\s*["\'](BshFiyatFarki|FiyatListesi|KampanyaBelgesi|Siparis|Fatura|Irsaliye|CariKart|UrunKarti)["\']',
+                content,
+            )
+            if m_doc:
+                return m_doc.group(1).strip()
+        return "KampanyaBelgesi"
+
+    @classmethod
     def _find_resume_offset_in_doc(
         cls,
         doc_text: str,
@@ -612,8 +656,8 @@ class LlmProviderService:
     ) -> int:
         """
         Çok sayfalı bir belgede bir önceki parçanın kaldığı karakter konumunu (offset) hesaplar.
-        Öncelikle yarıda kesilen başlık adını (last_cut_name) arar; yoksa son tamamlanan
-        kaydın alfanümerik model kodlarını (kuralAlani == 1) veya başlığını baz alır.
+        Öncelikle yarıda kesilen başlık/kod adını (last_cut_name) arar; yoksa son tamamlanan
+        kaydın ürün kodunu, alfanümerik model kodlarını (kuralAlani == 1) veya başlığını baz alır.
         """
         doc_norm = doc_text.replace("’", "'").replace("‘", "'")
         if last_cut_name:
@@ -642,11 +686,29 @@ class LlmProviderService:
                 ]
                 for tok in reversed(tokens):
                     pos = doc_text.find(tok, current_offset, current_offset + 8500)
+                    if pos == -1 and current_offset == 0:
+                        pos = doc_text.find(tok, current_offset)
                     if pos != -1:
                         best_pos = max(best_pos, pos + len(tok))
                         break
                 if best_pos > current_offset:
                     break
+
+            if best_pos == current_offset:
+                code_val = str(
+                    last_item.get("tedarikciUrunKodu")
+                    or last_item.get("urunKodu")
+                    or last_item.get("stokKodu")
+                    or last_item.get("kod")
+                    or ""
+                ).strip()
+                if code_val:
+                    pos = doc_norm.find(code_val, current_offset, current_offset + 12000)
+                    if pos == -1:
+                        pos = doc_norm.find(code_val, current_offset)
+                    if pos != -1:
+                        best_pos = max(best_pos, pos + len(code_val))
+
             if best_pos == current_offset:
                 nm = (
                     str(last_item.get("adi") or last_item.get("kampanyaAdi") or "")
@@ -656,6 +718,8 @@ class LlmProviderService:
                 )
                 if nm:
                     pos = doc_norm.find(nm, current_offset, current_offset + 8500)
+                    if pos == -1 and current_offset == 0:
+                        pos = doc_norm.find(nm, current_offset)
                     if pos != -1:
                         best_pos = max(best_pos, pos + len(nm) + 350)
         return best_pos
@@ -667,15 +731,65 @@ class LlmProviderService:
         s = re.sub(r'(:\s*(?:-?\d+(?:\.\d+)?|true|false|null))"\s*(?=[,}\]])', r"\1", s)
         s = re.sub(r'("[^"\\]*(?:\\.[^"\\]*)*")\s*\]\s*(?=,\s*"[^"]+"\s*:)', r"\1", s)
         s = re.sub(
-            r'\}\s*\]\s*,\s*(?="(?:kodu|kod|adi|ad|kampanyaKodu|kampanyaAdi)"\s*:)',
+            r'\}\s*\]\s*,\s*(?="(?:kodu|kod|adi|ad|kampanyaKodu|kampanyaAdi|tedarikciUrunKodu|urunKodu)"\s*:)',
             "}]},{",
             s,
         )
         return s
 
     @classmethod
+    def _normalize_document_header(
+        cls,
+        header_obj: Dict[str, Any],
+        cleaned_raw: str,
+        arr_key: Optional[str],
+        items: List[Dict[str, Any]],
+        fallback_doc_type: str,
+    ) -> Dict[str, Any]:
+        """Kurtarılan veya ayrıştırılan üst bilgi nesnesindeki eksik başlık alanlarını ve documentType değerini tamamlar."""
+        for str_key in ("documentType", "aciklama", "adi", "baslangicTarihi", "bitisTarihi", "hakedisSonTarihi", "cariUnvan"):
+            if not header_obj.get(str_key):
+                m_str = re.search(rf'"{str_key}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', cleaned_raw)
+                if m_str:
+                    header_obj[str_key] = m_str.group(1)
+
+        for bool_key in ("isDraft", "kdvDahilMi"):
+            if bool_key not in header_obj:
+                m_bool = re.search(rf'"{bool_key}"\s*:\s*(true|false)', cleaned_raw, re.IGNORECASE)
+                if m_bool:
+                    header_obj[bool_key] = m_bool.group(1).lower() == "true"
+
+        if "kdvOrani" not in header_obj:
+            m_num = re.search(r'"kdvOrani"\s*:\s*(-?\d+(?:\.\d+)?)', cleaned_raw)
+            if m_num:
+                try:
+                    num_val = float(m_num.group(1))
+                    header_obj["kdvOrani"] = int(num_val) if num_val.is_integer() else num_val
+                except Exception:
+                    pass
+
+        header_obj.setdefault("isDraft", True)
+
+        has_supplier_code = arr_key == "kalemler" and any(
+            isinstance(x, dict) and "tedarikciUrunKodu" in x for x in items
+        )
+        effective_fallback = (
+            fallback_doc_type
+            if fallback_doc_type and fallback_doc_type != "KampanyaBelgesi"
+            else ("BshFiyatFarki" if has_supplier_code else "KampanyaBelgesi")
+        )
+
+        cur_dt = str(header_obj.get("documentType") or "").strip()
+        if not cur_dt or (cur_dt == "KampanyaBelgesi" and effective_fallback != "KampanyaBelgesi"):
+            header_obj["documentType"] = effective_fallback
+
+        return header_obj
+
+    @classmethod
     def _parse_or_salvage_tool_args(
-        cls, raw_args: str
+        cls,
+        raw_args: str,
+        fallback_doc_type: str = "KampanyaBelgesi",
     ) -> Tuple[Optional[Dict[str, Any]], bool, Optional[str], Optional[str]]:
         """
         Tool argümanı JSON dizgesini ayrıştırır. Eğer upstream token sınırından dolayı yarıda
@@ -693,7 +807,9 @@ class LlmProviderService:
                 if isinstance(obj, dict):
                     for k in ("kampanyalar", "kalemler", "items", "satirlar", "fiyatlar", "urunler"):
                         if isinstance(obj.get(k), list):
+                            cls._normalize_document_header(obj, cleaned, k, obj.get(k) or [], fallback_doc_type)
                             return obj, True, k, None
+                    cls._normalize_document_header(obj, cleaned, None, [], fallback_doc_type)
                     return obj, True, None, None
             except Exception:
                 pass
@@ -733,15 +849,20 @@ class LlmProviderService:
 
         remainder = cleaned[last_good_end:]
         cut_off_name = None
-        m_name = re.search(r'"(?:adi|kampanyaAdi|baslik|name|title)"\s*:\s*"([^"]+)"', remainder)
+        m_name = re.search(
+            r'"(?:adi|kampanyaAdi|baslik|name|title|tedarikciUrunKodu|urunKodu|stokKodu|kod)"\s*:\s*"([^"]+)"',
+            remainder,
+        )
         if m_name:
             cut_off_name = m_name.group(1)
 
         try:
-            header_obj = json.loads(header_prefix + "}")
+            parsed_hdr = json.loads(header_prefix + "}")
+            header_obj = parsed_hdr if isinstance(parsed_hdr, dict) else {}
         except Exception:
-            header_obj = {"documentType": "KampanyaBelgesi", "isDraft": True}
+            header_obj = {}
 
+        cls._normalize_document_header(header_obj, cleaned, arr_key, complete_items, fallback_doc_type)
         header_obj[arr_key] = complete_items
         return header_obj, False, arr_key, cut_off_name
 
