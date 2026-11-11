@@ -5,6 +5,7 @@ export interface ChatAttachmentDTO {
   mimeType: string;
   kind: 'image' | 'document';
   dataUrl?: string;
+  base64Data?: string;
   extractedText?: string;
   estimatedTokens?: number;
 }

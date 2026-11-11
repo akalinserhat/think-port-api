@@ -6,7 +6,7 @@ from app.core.config import settings
 from app.api.v1.models_router import router as models_router
 from app.api.v1.chat_router import router as chat_router
 from app.api.v1.images_router import router as images_router
-from app.api.admin.state_router import router as admin_state_router
+from app.api.admin.state_router import router as admin_state_router, api_agents_router
 from app.api.admin.users_router import router as admin_users_router
 from app.api.admin.api_keys_router import router as admin_api_keys_router
 from app.api.admin.proxies_router import router as admin_proxies_router
@@ -64,6 +64,7 @@ def register_routers(application: FastAPI) -> None:
     application.include_router(chat_router)
     application.include_router(images_router)
     application.include_router(admin_state_router)
+    application.include_router(api_agents_router)
     application.include_router(admin_users_router)
     application.include_router(admin_api_keys_router)
     application.include_router(admin_proxies_router)

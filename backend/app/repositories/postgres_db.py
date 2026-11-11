@@ -1,22 +1,40 @@
 """
-ThinkPort AI Gateway - SQLite Veritabanı Bağlantı, Şema ve Başlangıç Verisi Yöneticisi (sqlite_db.py).
-WAL (Write-Ahead Logging), busy_timeout ve synchronous=NORMAL optimizasyonlarıyla yoğun eşzamanlı
-okuma/yazma yüklerinde kilitlenme yaşanmadan ilişkisel veri bütünlüğünü sağlar.
+ThinkPort AI Gateway - PostgreSQL (pgvector) Veritabanı Bağlantı, Şema ve Başlangıç Verisi Yöneticisi.
+Doğrudan PostgreSQL (thinkport_db) üzerinde ilişkisel veri bütünlüğünü ve pgvector RAG tablolarını yönetir.
 """
 from __future__ import annotations
 import hashlib
-import sqlite3
+import importlib.util
+import os
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, List, Optional
 
 try:
     from app.core.config import settings
-    DEFAULT_SQLITE_DB_PATH: Path = settings.sqlite_db_path
+    PG_HOST: str = settings.postgres_host
+    PG_PORT: int = settings.postgres_port
+    PG_USER: str = settings.postgres_user
+    PG_PASSWORD: str = settings.postgres_password
+    PG_DB: str = settings.postgres_db
 except Exception:
-    DEFAULT_SQLITE_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "gateway.db"
+    PG_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
+    PG_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
+    PG_USER = os.getenv("POSTGRES_USER", "gateway")
+    PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "gateway_secret_password")
+    PG_DB = os.getenv("POSTGRES_DB", "thinkport_db")
+
+try:
+    from app.repositories.postgres_driver import PgWireConnection
+except Exception:
+    _pg_drv_path = Path(__file__).resolve().parent / "postgres_driver.py"
+    _pg_spec = importlib.util.spec_from_file_location("postgres_driver", str(_pg_drv_path))
+    assert _pg_spec and _pg_spec.loader
+    _pg_mod = importlib.util.module_from_spec(_pg_spec)
+    _pg_spec.loader.exec_module(_pg_mod)
+    PgWireConnection = _pg_mod.PgWireConnection
 
 try:
     from app.core.security import hash_api_key
@@ -259,59 +277,238 @@ CREATE TABLE IF NOT EXISTS password_reset_logs (
 
 CREATE INDEX IF NOT EXISTS idx_password_reset_logs_created
     ON password_reset_logs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS api_protocols (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    request_script TEXT NOT NULL DEFAULT '',
+    response_script TEXT NOT NULL DEFAULT '',
+    models_script TEXT NOT NULL DEFAULT '',
+    is_system INTEGER NOT NULL DEFAULT 0,
+    connected_providers INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS ai_agents (
+    id INTEGER PRIMARY KEY,
+    uygulama_id TEXT NOT NULL DEFAULT 'THINKPORT_CORE',
+    ad TEXT NOT NULL,
+    kod TEXT NOT NULL,
+    aciklama TEXT NOT NULL DEFAULT '',
+    rol TEXT NOT NULL DEFAULT 'Genel AI Asistanı',
+    ikon TEXT NOT NULL DEFAULT 'Bot',
+    renk TEXT NOT NULL DEFAULT '#6366f1',
+    kapsam INTEGER NOT NULL DEFAULT 1,
+    ust_ajan_id INTEGER,
+    kurallar_json TEXT NOT NULL DEFAULT '[]',
+    sistem_istemi TEXT NOT NULL DEFAULT '',
+    hizli_istekler_json TEXT NOT NULL DEFAULT '[]',
+    ai_saglayici_id INTEGER,
+    model_adi TEXT NOT NULL DEFAULT 'gpt-4o',
+    alternatif_modeller_json TEXT NOT NULL DEFAULT '[]',
+    sicaklik REAL NOT NULL DEFAULT 0.7,
+    max_tokens INTEGER NOT NULL DEFAULT 2048,
+    yanit_sentezi_modu INTEGER NOT NULL DEFAULT 0,
+    secili_arac_kodlari_json TEXT NOT NULL DEFAULT '[]',
+    hafiza_aktif_mi INTEGER NOT NULL DEFAULT 1,
+    hafiza_max_kayit INTEGER NOT NULL DEFAULT 1000,
+    hafiza_saklama_gun INTEGER NOT NULL DEFAULT 30,
+    hafiza_arama_top_k INTEGER NOT NULL DEFAULT 5,
+    gozlemci_aktif_mi INTEGER NOT NULL DEFAULT 1,
+    aktif_mi INTEGER NOT NULL DEFAULT 1,
+    sistem_kaydi_mi INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+"""
+
+PG_VECTOR_RAG_SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS rag_document_chunks (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+    message_id TEXT,
+    file_name TEXT NOT NULL,
+    page_number INTEGER NOT NULL DEFAULT 1,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    embedding vector(384),
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_conv_order
+    ON rag_document_chunks(conversation_id, file_name, chunk_index ASC);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_hnsw
+    ON rag_document_chunks USING hnsw (embedding vector_cosine_ops);
+
+CREATE TABLE IF NOT EXISTS rag_session_memory (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL DEFAULT '',
+    turn_index INTEGER NOT NULL DEFAULT 0,
+    role TEXT NOT NULL DEFAULT 'assistant',
+    tool_name TEXT NOT NULL DEFAULT '',
+    extracted_count INTEGER NOT NULL DEFAULT 0,
+    last_item_key TEXT NOT NULL DEFAULT '',
+    cut_item_key TEXT NOT NULL DEFAULT '',
+    is_complete INTEGER NOT NULL DEFAULT 1,
+    content TEXT NOT NULL DEFAULT '',
+    embedding vector(384),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_memory_conv_turn
+    ON rag_session_memory(conversation_id, turn_index ASC, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS agent_memories (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    memory_type TEXT NOT NULL DEFAULT 'interaction',
+    role TEXT NOT NULL DEFAULT 'assistant',
+    prompt_text TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    importance REAL NOT NULL DEFAULT 0.5,
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    access_count INTEGER NOT NULL DEFAULT 0,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    embedding vector(384),
+    expires_at TEXT,
+    last_accessed_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_app_agent
+    ON agent_memories(app_id, agent_id, is_pinned DESC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_embedding_hnsw
+    ON agent_memories USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memories_content_trgm
+    ON agent_memories USING gin (content gin_trgm_ops);
 """
 
 
-class SqliteDatabaseManager:
+class PostgresDatabaseManager:
     """
-    SQLite veritabanı bağlantı, şema oluşturma (DDL) ve başlangıç (seed) yönetimi.
-    WAL (Write-Ahead Logging) modu ve Yabancı Anahtar (Foreign Key) bütünlüğü ile çalışır.
+    PostgreSQL (pgvector) birincil veritabanı bağlantı, şema oluşturma (DDL) ve
+    başlangıç (seed) yöneticisi.
     Tüm kullanıcılar (Sistem Yöneticileri + API/Kota Kullanıcıları) tek bir `users` tablosunda tutulur.
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self._db_path = db_path or DEFAULT_SQLITE_DB_PATH
+    def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._pg_available: bool = True
         self._initialize_database()
 
     @property
-    def db_path(self) -> Path:
-        """Veritabanı dosya yolunu döner."""
-        return self._db_path
+    def is_postgres_active(self) -> bool:
+        """Aktif bağlantının PostgreSQL (thinkport_db) üzerinde çalışıp çalışmadığını döner."""
+        return bool(self._pg_available)
+
+    def _open_pg_connection(self) -> PgWireConnection:
+        return PgWireConnection(
+            host=PG_HOST,
+            port=PG_PORT,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            database=PG_DB,
+            timeout=30.0,
+        )
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
-        """Thread-safe, Row fabrikalı ve WAL/busy_timeout optimizasyonlu SQLite bağlantı bağlamı döner."""
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+    def connection(self) -> Iterator[PgWireConnection]:
+        """Thread-safe PostgreSQL (thinkport_db) bağlantı bağlamı döner."""
         with self._lock:
-            conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
+            pg_conn = self._open_pg_connection()
+            self._pg_available = True
             try:
-                conn.execute("PRAGMA busy_timeout = 10000;")
-                conn.execute("PRAGMA foreign_keys = ON;")
-                conn.execute("PRAGMA synchronous = NORMAL;")
-                yield conn
-                conn.commit()
+                pg_conn.begin()
+                yield pg_conn
+                pg_conn.commit()
             except Exception:
-                conn.rollback()
+                pg_conn.rollback()
                 raise
             finally:
-                conn.close()
+                pg_conn.close()
 
     def _initialize_database(self) -> None:
-        """Tabloları, tekil kullanıcı migrasyonunu, benzersizlik indekslerini ve başlangıç (seed) verilerini oluşturur."""
+        """Tabloları, pgvector RAG şemasını ve başlangıç verilerini oluşturur."""
         with self.connection() as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
             conn.executescript(SCHEMA_SQL)
+            conn.executescript(PG_VECTOR_RAG_SCHEMA_SQL)
             self._migrate_to_single_users_table(conn)
+            self._migrate_agent_and_memory_columns(conn)
             self._seed_default_users_if_empty(conn)
             self._seed_default_api_keys_if_empty(conn)
             self._seed_default_conversations_if_empty(conn)
             self._seed_default_pool_telemetry_if_empty(conn)
             self._seed_default_roles_and_smtp_if_empty(conn)
+            self._seed_default_protocols_if_empty(conn)
+            self._seed_default_agents_if_empty(conn)
+            try:
+                from app.core.logger import gateway_logger
+                conv_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_conversations").fetchone()["c"]
+                msg_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_messages").fetchone()["c"]
+                att_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_message_attachments").fetchone()["c"]
+                ulog_cnt = conn.execute("SELECT COUNT(1) AS c FROM usage_logs").fetchone()["c"]
+                usr_cnt = conn.execute("SELECT COUNT(1) AS c FROM users").fetchone()["c"]
+                gateway_logger.info(
+                    f"PostgreSQL (pgvector) '{PG_DB}' aktif | users={usr_cnt} | conversations={conv_cnt} | messages={msg_cnt} | attachments={att_cnt} | usage_logs={ulog_cnt}"
+                )
+            except Exception:
+                pass
 
     @staticmethod
-    def _migrate_to_single_users_table(conn: sqlite3.Connection) -> None:
+    def _migrate_agent_and_memory_columns(conn: PgWireConnection) -> None:
+        """
+        `ai_agents` ve `chat_conversations` tablolarına `(app_id, agent_id)` birleşik kimlik
+        ve pgvector hafıza sınırı sütunlarını ekler.
+        """
+        agent_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(ai_agents)").fetchall()
+        }
+        if "uygulama_id" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN uygulama_id TEXT NOT NULL DEFAULT 'THINKPORT_CORE'")
+        if "hafiza_aktif_mi" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN hafiza_aktif_mi INTEGER NOT NULL DEFAULT 1")
+        if "hafiza_max_kayit" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN hafiza_max_kayit INTEGER NOT NULL DEFAULT 1000")
+        if "hafiza_saklama_gun" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN hafiza_saklama_gun INTEGER NOT NULL DEFAULT 30")
+        if "hafiza_arama_top_k" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN hafiza_arama_top_k INTEGER NOT NULL DEFAULT 5")
+        if "gozlemci_aktif_mi" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN gozlemci_aktif_mi INTEGER NOT NULL DEFAULT 1")
+
+        # Varsayılan Webakus ERP ajanının uygulama_id değerini WEBAKUS_ERP olarak güncelle
+        conn.execute(
+            "UPDATE ai_agents SET uygulama_id = 'WEBAKUS_ERP' WHERE kod = 'WEBAKUS_ERP_ASISTANI' AND (uygulama_id = '' OR uygulama_id = 'THINKPORT_CORE')"
+        )
+
+        conv_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(chat_conversations)").fetchall()
+        }
+        if "app_id" not in conv_cols:
+            conn.execute("ALTER TABLE chat_conversations ADD COLUMN app_id TEXT NOT NULL DEFAULT ''")
+        if "agent_id" not in conv_cols:
+            conn.execute("ALTER TABLE chat_conversations ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
+    def _migrate_to_single_users_table(conn: PgWireConnection) -> None:
         """
         Tüm kullanıcıları tek bir `users` tablosunda birleştirir, eski `system_users` tablosunu
         varsa tekil `users` tablosuna aktararak kaldırır ve büyük/küçük harf duyarsız (LOWER(TRIM(email)))
@@ -585,12 +782,12 @@ class SqliteDatabaseManager:
         )
 
     @staticmethod
-    def sync_system_users_to_users(conn: sqlite3.Connection) -> None:
+    def sync_system_users_to_users(conn: PgWireConnection) -> None:
         """Geriye dönük uyumluluk kancası: tüm kullanıcılar artık tek `users` tablosundadır."""
         return None
 
     @staticmethod
-    def _seed_default_users_if_empty(conn: sqlite3.Connection) -> None:
+    def _seed_default_users_if_empty(conn: PgWireConnection) -> None:
         """Tekil `users` tablosuna varsayılan Sistem Yöneticisi kaydını ekler."""
         now_iso = datetime.now(timezone.utc).isoformat()
         default_pwd = "190300"
@@ -658,17 +855,17 @@ class SqliteDatabaseManager:
                 )
 
     @staticmethod
-    def _seed_default_api_keys_if_empty(conn: sqlite3.Connection) -> None:
+    def _seed_default_api_keys_if_empty(conn: PgWireConnection) -> None:
         """Örnek API anahtarı otomatik eklemesi devre dışı bırakıldı."""
         return None
 
     @staticmethod
-    def _seed_default_conversations_if_empty(conn: sqlite3.Connection) -> None:
+    def _seed_default_conversations_if_empty(conn: PgWireConnection) -> None:
         """Örnek sohbet oturumu otomatik eklemesi devre dışı bırakıldı."""
         return None
 
     @staticmethod
-    def _seed_default_pool_telemetry_if_empty(conn: sqlite3.Connection) -> None:
+    def _seed_default_pool_telemetry_if_empty(conn: PgWireConnection) -> None:
         """Bağlantı havuzu zaman serisi ve ölçeklenme olay tabloları boşsa örnek başlangıç verilerini yükler."""
         snap_count = conn.execute("SELECT COUNT(1) FROM pool_metrics_snapshots").fetchone()[0]
         now = datetime.now(timezone.utc)
@@ -787,7 +984,7 @@ class SqliteDatabaseManager:
             )
 
     @staticmethod
-    def _seed_default_roles_and_smtp_if_empty(conn: sqlite3.Connection) -> None:
+    def _seed_default_roles_and_smtp_if_empty(conn: PgWireConnection) -> None:
         import json as _json
         now_iso = datetime.now(timezone.utc).isoformat()
         all_perms_json = _json.dumps([
@@ -961,5 +1158,530 @@ class SqliteDatabaseManager:
                 ),
             )
 
+    @staticmethod
+    def _seed_default_protocols_if_empty(conn: PgWireConnection) -> None:
+        """Varsayılan dinamik AI API protokollerini (OpenAI, Anthropic, Gemini, Ollama) tohumlar."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        existing = conn.execute("SELECT COUNT(1) AS cnt FROM api_protocols").fetchone()
+        if existing and int(existing["cnt"] or 0) > 0:
+            return
 
-sqlite_db = SqliteDatabaseManager()
+        default_protocols = [
+            (
+                "proto_openai",
+                "OpenAI REST API Uyumluluğu",
+                "OpenAI, DeepSeek, Groq, Ollama ve vLLM gibi standart /v1/chat/completions uç noktası kullanan sistemler için evrensel adaptör.",
+                """function buildRequest(context) {
+    var endpoint = context.endpoint || '/chat/completions';
+    var headers = {
+        'Content-Type': 'application/json'
+    };
+    if (context.apiKey) {
+        headers['Authorization'] = 'Bearer ' + context.apiKey;
+    }
+    var body = {
+        model: context.model,
+        messages: context.messages,
+        temperature: context.temperature !== undefined ? context.temperature : 0.7,
+        max_tokens: context.maxTokens || 2048
+    };
+    return {
+        url: context.baseUrl + endpoint,
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body)
+    };
+}""",
+                """function parseResponse(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    var content = '';
+    if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+        content = data.choices[0].message.content || '';
+    }
+    var promptTokens = 0;
+    var completionTokens = 0;
+    if (data.usage) {
+        promptTokens = data.usage.prompt_tokens || 0;
+        completionTokens = data.usage.completion_tokens || 0;
+    }
+    return {
+        content: content,
+        promptTokens: promptTokens,
+        completionTokens: completionTokens,
+        totalTokens: promptTokens + completionTokens
+    };
+}""",
+                """function parseModels(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    var models = [];
+    if (data && data.data && Array.isArray(data.data)) {
+        for (var i = 0; i < data.data.length; i++) {
+            if (data.data[i] && data.data[i].id) {
+                models.push(data.data[i].id);
+            }
+        }
+    }
+    return models;
+}""",
+                1,
+                2,
+                now_iso,
+                now_iso,
+            ),
+            (
+                "proto_anthropic",
+                "Anthropic Claude REST API",
+                "Anthropic Claude modelleri için /v1/messages formatı ve x-api-key başlığı kullanan resmi protokol adaptörü.",
+                """function buildRequest(context) {
+    var endpoint = context.endpoint || '/messages';
+    var headers = {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01'
+    };
+    if (context.apiKey) {
+        headers['x-api-key'] = context.apiKey;
+    }
+    var systemPrompt = '';
+    var filteredMessages = [];
+    if (context.messages && Array.isArray(context.messages)) {
+        for (var i = 0; i < context.messages.length; i++) {
+            var msg = context.messages[i];
+            if (msg.role === 'system') {
+                systemPrompt = (systemPrompt ? systemPrompt + '\\n' : '') + msg.content;
+            } else {
+                filteredMessages.push(msg);
+            }
+        }
+    }
+    var body = {
+        model: context.model,
+        messages: filteredMessages,
+        max_tokens: context.maxTokens || 2048,
+        temperature: context.temperature !== undefined ? context.temperature : 0.7
+    };
+    if (systemPrompt) {
+        body.system = systemPrompt;
+    }
+    return {
+        url: context.baseUrl + endpoint,
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body)
+    };
+}""",
+                """function parseResponse(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    var content = '';
+    if (data.content && Array.isArray(data.content)) {
+        for (var i = 0; i < data.content.length; i++) {
+            if (data.content[i].type === 'text') {
+                content += data.content[i].text || '';
+            }
+        }
+    }
+    var promptTokens = 0;
+    var completionTokens = 0;
+    if (data.usage) {
+        promptTokens = data.usage.input_tokens || 0;
+        completionTokens = data.usage.output_tokens || 0;
+    }
+    return {
+        content: content,
+        promptTokens: promptTokens,
+        completionTokens: completionTokens,
+        totalTokens: promptTokens + completionTokens
+    };
+}""",
+                """function parseModels(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    if (data && data.data && Array.isArray(data.data)) {
+        return data.data.map(function(m) { return m.id; });
+    }
+    return ['claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'];
+}""",
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+            (
+                "proto_gemini",
+                "Google Gemini REST API",
+                "Google Gemini v1beta REST API (models:generateContent) JSON şema adaptörü.",
+                """function buildRequest(context) {
+    var endpoint = '/models/' + encodeURIComponent(context.model) + ':generateContent';
+    var url = context.baseUrl + endpoint + '?key=' + (context.apiKey || '');
+    var headers = {
+        'Content-Type': 'application/json'
+    };
+    var contents = [];
+    var systemInstruction = null;
+    if (context.messages && Array.isArray(context.messages)) {
+        for (var i = 0; i < context.messages.length; i++) {
+            var msg = context.messages[i];
+            if (msg.role === 'system') {
+                systemInstruction = { parts: [{ text: msg.content }] };
+            } else {
+                var role = msg.role === 'assistant' ? 'model' : 'user';
+                contents.push({ role: role, parts: [{ text: msg.content }] });
+            }
+        }
+    }
+    var body = {
+        contents: contents,
+        generationConfig: {
+            temperature: context.temperature !== undefined ? context.temperature : 0.7,
+            maxOutputTokens: context.maxTokens || 2048
+        }
+    };
+    if (systemInstruction) {
+        body.systemInstruction = systemInstruction;
+    }
+    return {
+        url: url,
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body)
+    };
+}""",
+                """function parseResponse(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    var content = '';
+    if (data.candidates && data.candidates.length > 0 && data.candidates[0].content && data.candidates[0].content.parts) {
+        var parts = data.candidates[0].content.parts;
+        for (var i = 0; i < parts.length; i++) {
+            content += parts[i].text || '';
+        }
+    }
+    var promptTokens = 0;
+    var completionTokens = 0;
+    if (data.usageMetadata) {
+        promptTokens = data.usageMetadata.promptTokenCount || 0;
+        completionTokens = data.usageMetadata.candidatesTokenCount || 0;
+    }
+    return {
+        content: content,
+        promptTokens: promptTokens,
+        completionTokens: completionTokens,
+        totalTokens: promptTokens + completionTokens
+    };
+}""",
+                """function parseModels(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    if (data && data.models && Array.isArray(data.models)) {
+        return data.models.map(function(m) { return (m.name || '').replace('models/', ''); });
+    }
+    return ['gemini-2.5-pro', 'gemini-2.0-flash'];
+}""",
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+            (
+                "proto_ollama",
+                "Ollama Yerel Motor API",
+                "Yerel sunucuda çalışan Ollama (/api/chat ve /api/tags) açık kaynaklı LLM modelleri için doğrudan protokol adaptörü.",
+                """function buildRequest(context) {
+    var endpoint = context.endpoint || '/api/chat';
+    var headers = {
+        'Content-Type': 'application/json'
+    };
+    var body = {
+        model: context.model,
+        messages: context.messages,
+        stream: false,
+        options: {
+            temperature: context.temperature !== undefined ? context.temperature : 0.7,
+            num_predict: context.maxTokens || 2048
+        }
+    };
+    return {
+        url: context.baseUrl + endpoint,
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(body)
+    };
+}""",
+                """function parseResponse(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    var content = (data.message && data.message.content) ? data.message.content : (data.response || '');
+    var promptTokens = data.prompt_eval_count || 0;
+    var completionTokens = data.eval_count || 0;
+    return {
+        content: content,
+        promptTokens: promptTokens,
+        completionTokens: completionTokens,
+        totalTokens: promptTokens + completionTokens
+    };
+}""",
+                """function parseModels(rawResponse) {
+    var data = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
+    if (data && data.models && Array.isArray(data.models)) {
+        return data.models.map(function(m) { return m.name; });
+    }
+    return [];
+}""",
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+        ]
+
+        conn.executemany(
+            """
+            INSERT INTO api_protocols (
+                id, name, description, request_script, response_script, models_script,
+                is_system, connected_providers, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            default_protocols,
+        )
+
+    @staticmethod
+    def _seed_default_agents_if_empty(conn: PgWireConnection) -> None:
+        """
+        Varsayılan AI Ajanlarını (Sohbet & Yanıt Gözlemci Ajanı, ThinkPort Genel AI Asistanı ve Webakus ERP Uzman Ajanı)
+        yalnızca tablo boşsa tohumlar. Mevcut kayıtların sistem istemlerini veya kurallarını asla ezmez.
+        """
+        import json as _json
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        observer_rules = [
+            {
+                "id": "KIMLIK",
+                "baslik": "Gözlemci Ajan Kimliği ve Sanal Excel Tablosu Denetim Misyonu",
+                "aciklama": "Sohbet, sanal Excel tablosu çıkarımı ve araç çağrısı bütünlüğü denetçisi",
+                "icerik": (
+                    "Sen ThinkPort AI Gateway ve Webakus Ajan ekosisteminde çalışan otonom Sohbet & Yanıt Gözlemci Ajanısın (Observer LLM). "
+                    "Görevin, ekli PDF/belge içerisindeki kullanıcının talep ettiği hedef tabloları (örn: 'Tekil Fiyat Farkları' ve '... Fırsat Modelleri') "
+                    "önce kendi hafızanda 1. sütunu (Ürün Grubu) atılmış `UrunKodu;Fiyat` formatında 2 sütunlu eksiksiz bir Sanal Excel/CSV Tablosuna dönüştürmek, "
+                    "ardından birincil LLM'in şu ana kadar ürettiği kayıtları bu sanal Excel tablosuyla satır satır karşılaştırarak eksik kalan satırları "
+                    "`observer_continue_generation` aracının `continuation_prompt` alanı içinde hazır `UrunKodu;Fiyat` Excel/CSV listesi olarak birincil modele sunmaktır."
+                ),
+                "sira": 1,
+                "durum": "Yeni",
+                "kilitliMi": True,
+                "orijinalBaseIcerik": None,
+            },
+            {
+                "id": "TETIKLEME_KRITERLERI",
+                "baslik": "Sanal Excel Tablosu Kapsamı ve Kesinti Tespit Kriterleri",
+                "aciklama": "Hangi durumlarda otomatik tamamlama başlatılacağı ve ne zaman durulacağı",
+                "icerik": (
+                    "Hafızanda Sanal Excel/CSV Tablosunu (`UrunKodu;Fiyat`) oluştururken ve denetlerken şu kuralları uygula: "
+                    "1) YALNIZCA HEDEF TABLOLARI AL, KAPSAM DIŞI TABLOLARI VE DEVAM SAYFALARINI HARİÇ TUT: Yalnızca kullanıcının isteminde talep ettiği hedef tabloları ('Tekil Fiyat Farkları' ve '... Fırsat Modelleri') sanal Excel tablosuna dahil et. Belgede hariç tutulan bir tablo başlığı (örn. 'Aile Bakanlığı Modelleri') başladığı andan itibaren, o başlığın altındaki satırlar VE yeni bir hedef tablo başlığı görülmediği sürece sonraki sayfalarda başlık tekrarlanmadan devam eden TÜM satırlar kesinlikle sanal Excel tablosunun dışındadır. "
+                    "2) ÇOK SAYFALI HEDEF TABLOLARI SON SATIRINA KADAR BİRLEŞTİR: Birinci hedef tablonun devam sayfasındaki en son satırları (ikinci hedef tablo başlığının hemen üstündeki satırlar) ve ikinci hedef tablonun devam sayfasındaki en son satırları (kapsam dışı 'Aile Bakanlığı Modelleri' başlığının hemen üstündeki son satıra kadar olan bölüm) sanal Excel tablosuna eksiksiz dahil edilir. "
+                    "3) ÇELİŞKİSİZ TAMAMLANMA KURALI: Eğer oluşturduğun sanal Excel tablosundaki tüm hedef satırlar birincil model tarafından çıkarılmışsa (eklenecek yeni bir hedef satır kalmamışsa) KESİNLİKLE `is_complete=true` ve `continuation_prompt=\"\"` döndür! Eklenecek yeni satır yokken asla 'şu kayıtta dur / fazla kayıt var' diyerek `is_complete=false` döndürme!"
+                ),
+                "sira": 2,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+            {
+                "id": "DEVAM_ISTEMI_KURALLARI",
+                "baslik": "Eksik Satırları Hazır Excel/CSV Tablosu (UrunKodu;Fiyat) Olarak Verme Kuralları",
+                "aciklama": "Kesilen noktadan sıfır tekrarla ve hazır sanal Excel/CSV tablosuyla devam ettirme yönergesi",
+                "icerik": (
+                    "Önceki yanıt token sınırı nedeniyle yarıda kaldığında veya hedef tablolarda eksik satır tespit ettiğinde (`is_complete=false`): "
+                    "1) EKSİK KALAN TÜM SATIRLARI `UrunKodu;Fiyat` EXCEL/CSV FORMATINDA LİSTELE: `continuation_prompt` içerisine genel bir açıklama yazmak yerine, hafızandaki Sanal Excel Tablosunda henüz çıkarılmamış olan TÜM kalan satırları (varsa 1. tablo sonunda atlanan satırlar ve son çıkarılan kayıttan hedef tablonun en son satırına kadar kalan tüm satırlar dahil) her satırda `UrunKodu;Fiyat` olacak şekilde eksiksiz bir Excel/CSV tablosu olarak yaz! "
+                    "2) SADECE SALT ÜRÜN KODU KURALI: Hazırladığın `UrunKodu;Fiyat` tablosunda 1. sütundaki Ürün Grubu / kategori adını (fırın, davlumbaz, bulaşık, kurutma, ocak, derin dondurucu, kapasite veya grup sınıfı vb.) KESİNLİKLE ürün kodunun önüne ekleme; yalnızca boşluksuz, tek kelimelik salt alfanümerik ürün/model kodunu yaz. "
+                    "3) HARF ÖNEKİ (PREFIX) VE KARAKTER SADAKATİ: Ardışık satırlarda ürün kodlarının başlangıç harf önekleri değiştiğinde, belgedeki harf dizilimini birebir koru ve birincil modele yalnızca `continuation_prompt` içinde verdiğin bu hazır Excel/CSV tablosundaki satırları birebir aktarmasını, tabloda olmayan hiçbir kodu uydurmamasını söyle."
+                ),
+                "sira": 3,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+            {
+                "id": "BIRLESTIRME_VE_SENTEZ",
+                "baslik": "Yanıt Birleştirme (Stitching) ve Tutarlılık Politikası",
+                "aciklama": "Parçalı yanıtları tek yanıt olarak birleştirme",
+                "icerik": (
+                    "Birincil model, `continuation_prompt` içinde sunduğun `UrunKodu;Fiyat` sanal Excel tablosundaki kalan satırları da ürettiğinde ve hedef tabloların ilk satırından son satırına kadar tüm kayıtlar tamamlandığında `is_complete=true` ve `continuation_prompt=\"\"` döndürerek süreci sonlandır."
+                ),
+                "sira": 4,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+        ]
+        observer_prompt = "\n\n".join(
+            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in observer_rules
+        )
+
+        existing = conn.execute("SELECT COUNT(1) AS cnt FROM ai_agents").fetchone()
+        if existing and int(existing["cnt"] or 0) > 0:
+            obs_row = conn.execute(
+                "SELECT id, sistem_istemi FROM ai_agents WHERE LOWER(TRIM(kod)) = 'gozlemci_ajan' LIMIT 1"
+            ).fetchone()
+            if obs_row and "EKSİK KALAN TÜM SATIRLARI `UrunKodu;Fiyat` EXCEL/CSV FORMATINDA LİSTELE" not in str(obs_row.get("sistem_istemi") or ""):
+                conn.execute(
+                    "UPDATE ai_agents SET kurallar_json = ?, sistem_istemi = ?, updated_at = ? WHERE id = ?",
+                    (_json.dumps(observer_rules, ensure_ascii=False), observer_prompt, now_iso, obs_row["id"]),
+                )
+            return
+
+        general_rules = [
+            {
+                "id": "KIMLIK",
+                "baslik": "Ajan Kimliği ve Yetki Sınırları",
+                "aciklama": "ThinkPort Genel AI Asistanı temel kimliği",
+                "icerik": (
+                    "Sen ThinkPort AI Gateway üzerinde çalışan çok modelli yapay zeka asistanısın. "
+                    "Kullanıcının sorularını, ekli dokümanlarını (RAG) ve teknik taleplerini doğru, yapılandırılmış ve eksiksiz şekilde yanıtlarsın."
+                ),
+                "sira": 1,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+            {
+                "id": "DOKUMAN_VE_RAG",
+                "baslik": "Ekli Belge ve RAG Bağlamı Kullanımı",
+                "aciklama": "pgvector RAG ve belge doğrulama ilkesi",
+                "icerik": (
+                    "Sohbete eklenmiş belge veya pgvector RAG parçaları varsa yanıtlarını doğrudan belge içeriğine dayandır; "
+                    "belgede yer almayan bilgileri tahmini olarak uydurma."
+                ),
+                "sira": 2,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+        ]
+        general_prompt = "\n\n".join(
+            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in general_rules
+        )
+
+        erp_rules = [
+            {
+                "id": "KIMLIK",
+                "baslik": "Ajan Kimliği ve Yetki Sınırları",
+                "aciklama": "Webakus ERP uzman ajan kimliği",
+                "icerik": (
+                    "Sen Webakus ERP sisteminde çalışan yetkili bir yapay zeka asistanısın. "
+                    "Yalnızca ERP kapsamındaki ticari belgeler, cari hesaplar, stok/ürün yönetimi ve şirket içi analizlerde yardımcı ol; "
+                    "konu dışı soruları nazikçe reddet."
+                ),
+                "sira": 1,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+            {
+                "id": "OTONOM_MCP",
+                "baslik": "Otonom MCP Araç ve Flowchart Kullanımı",
+                "aciklama": "MCP fonksiyonlarını ve görev akışlarını yürütme",
+                "icerik": (
+                    "Kullanıcının talebi yetki sınırların içerisindeyse tanımlı MCP araçlarını (erp_query_data, erp_navigate, "
+                    "erp_create_document, erp_request_confirmation) kendi zekanla seç ve çalıştır. Tanımlı bir Görev Akışı (Flowchart) "
+                    "tetiklendiyse adımları sırasıyla ve eksiksiz uygula."
+                ),
+                "sira": 2,
+                "durum": "Yeni",
+                "kilitliMi": False,
+                "orijinalBaseIcerik": None,
+            },
+        ]
+        erp_prompt = "\n\n".join(
+            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in erp_rules
+        )
+
+        seed_agents = [
+            (
+                1,
+                "Sohbet & Yanıt Gözlemci Ajanı",
+                "GOZLEMCI_AJAN",
+                "Token yetmezliği (finish_reason=length), tembel kısaltma (...), erken akış kesilmesi ve yarım kalan yanıtları tespit ederek otomatik devam istemi (continuation prompt) üreten ve yanıtları birleştiren sistem gözetmen ajanı.",
+                "Kesintisiz Yanıt & Akış Denetçisi (Observer LLM)",
+                "Shield",
+                "#10b981",
+                2,
+                None,
+                _json.dumps(observer_rules, ensure_ascii=False),
+                observer_prompt,
+                "[]",
+                1,
+                "gpt-4o",
+                _json.dumps(["claude-3-5-sonnet", "gemini-2.5-pro"], ensure_ascii=False),
+                0.2,
+                2048,
+                1,
+                _json.dumps(["observer_detect_truncation", "observer_continue_generation"], ensure_ascii=False),
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+            (
+                2,
+                "ThinkPort Genel AI Asistanı",
+                "THINKPORT_GENEL_ASISTAN",
+                "ThinkPort Sohbet Stüdyosu ve /v1 API istekleri için çok modelli genel asistan ve pgvector RAG doküman analiz uzmanı.",
+                "Çok Modelli Genel AI & Doküman Analiz Asistanı",
+                "Bot",
+                "#6366f1",
+                1,
+                None,
+                _json.dumps(general_rules, ensure_ascii=False),
+                general_prompt,
+                "[]",
+                1,
+                "gpt-4o",
+                _json.dumps(["claude-3-5-sonnet", "deepseek-r1"], ensure_ascii=False),
+                0.7,
+                4096,
+                0,
+                _json.dumps(["rag_search_documents"], ensure_ascii=False),
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+            (
+                3,
+                "Webakus ERP & MCP Uzman Ajanı",
+                "WEBAKUS_ERP_ASISTANI",
+                "Webakus ERP modülleri, ticari belgeler, cari hesaplar ve görsel Flowchart görev akışları için temel kök (Base) uzman ajan.",
+                "Kurumsal ERP, Belge & Görev Akışı (Flowchart) Ajanı",
+                "Sparkles",
+                "#3b82f6",
+                1,
+                None,
+                _json.dumps(erp_rules, ensure_ascii=False),
+                erp_prompt,
+                "[]",
+                1,
+                "gpt-4o",
+                _json.dumps(["claude-3-5-sonnet"], ensure_ascii=False),
+                0.4,
+                4096,
+                0,
+                _json.dumps(["erp_query_data", "erp_navigate", "erp_create_document", "erp_request_confirmation", "erp_get_page_context", "erp_list_cloud_files"], ensure_ascii=False),
+                1,
+                1,
+                now_iso,
+                now_iso,
+            ),
+        ]
+
+        conn.executemany(
+            """
+            INSERT INTO ai_agents (
+                id, ad, kod, aciklama, rol, ikon, renk, kapsam, ust_ajan_id,
+                kurallar_json, sistem_istemi, hizli_istekler_json, ai_saglayici_id,
+                model_adi, alternatif_modeller_json, sicaklik, max_tokens,
+                yanit_sentezi_modu, secili_arac_kodlari_json, aktif_mi, sistem_kaydi_mi,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            seed_agents,
+        )
+
+
+postgres_db = PostgresDatabaseManager()
+sqlite_db = postgres_db

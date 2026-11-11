@@ -328,13 +328,26 @@ export interface PoolTimelinePointDTO {
 
 export interface PoolScalingEventDTO {
   id: string;
-  event_type: 'autoscale_up' | 'autoscale_down' | 'manual_spawn' | 'session_terminated' | 'proxy_cooldown' | string;
+  event_type:
+    | 'autoscale_up'
+    | 'autoscale_down'
+    | 'scale_up'
+    | 'scale_down'
+    | 'manual_spawn'
+    | 'session_terminated'
+    | 'proxy_cooldown'
+    | 'proxy_rotate'
+    | string;
   session_id: string;
   provider: string;
   proxy_endpoint: string;
+  proxy_id?: string;
   detail: string;
+  reason?: string;
   total_sessions_after: number;
+  dynamic_sessions_after?: number;
   created_at: string;
+  timestamp_iso?: string;
 }
 
 export interface ProviderPoolStatDTO {
@@ -376,6 +389,7 @@ export interface PoolDashboardMetricsDTO {
   provider_distribution: ProviderPoolStatDTO[];
   proxy_region_distribution: ProxyRegionStatDTO[];
   recent_events: PoolScalingEventDTO[];
+  scaling_events?: PoolScalingEventDTO[];
 }
 
 export interface AdminStateResponseDTO {
@@ -394,3 +408,41 @@ export interface AdminStateResponseDTO {
 export type ActiveTab = 'chat' | 'overview' | 'users' | 'keys' | 'nodes' | 'settings';
 export type ThemeMode = 'light' | 'dark';
 export type SupportedLanguage = 'tr' | 'en';
+
+export interface ApiProtocolDTO {
+  id: string;
+  ad: string;
+  name?: string;
+  aciklama?: string;
+  description?: string;
+  requestScript: string;
+  responseScript: string;
+  modelsScript?: string;
+  sistemProtokoluMu: boolean;
+  is_system?: boolean;
+  bagliSaglayiciSayisi: number;
+  connected_providers?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ApiProtocolTestRequestDTO {
+  protokolId?: string;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  testMessage: string;
+  requestScript: string;
+  responseScript: string;
+  modelsScript?: string;
+}
+
+export interface ApiProtocolTestResponseDTO {
+  content: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requestUrl?: string;
+  latencyMs?: number;
+  simulated?: boolean;
+}

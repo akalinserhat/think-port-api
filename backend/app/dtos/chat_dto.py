@@ -58,7 +58,11 @@ class ChatCompletionRequestDTO(BaseModel):
     response_format: Optional[Union[ResponseFormatDTO, Dict[str, Any], str]] = None
     user: Optional[str] = None
     conversation_id: Optional[str] = None
-    source: Optional[Literal["studio", "api"]] = None
+    source: Optional[Literal["studio", "api", "agent"]] = None
+    app_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_code: Optional[str] = None
+    agent_name: Optional[str] = None
 
     def normalized_response_format(self) -> Optional[Dict[str, Any]]:
         """`response_format` alanını standart sözlük yapısına dönüştürür."""
@@ -165,6 +169,9 @@ class ChatJobDTO(BaseModel):
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
+    app_id: str = ""
+    agent_id: str = ""
+    gozlemci_aktif_mi: bool = True
 
 
 class StreamEventDTO(BaseModel):

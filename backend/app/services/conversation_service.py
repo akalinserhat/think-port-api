@@ -165,12 +165,12 @@ class ConversationService:
         Sohbet Stüdyosu veya harici istemciden gelen turu idempotent olarak (request_id kontrolüyle)
         veritabanına kaydeder; zaten ChatService tarafından kaydedilmişse mevcut kaydı korur.
         """
-        from app.repositories import sqlite_cli_bridge
+        from app.repositories import postgres_cli_bridge
 
         payload = dto.model_dump()
         payload["authorization"] = authorization or ""
         payload["x_user_id"] = x_user_id or ""
-        res = sqlite_cli_bridge.record_turn(payload)
+        res = postgres_cli_bridge.record_turn(payload)
         conv_id = res.get("conversation_id")
         if conv_id:
             conversation_event_broadcaster.publish("message_appended", str(conv_id))

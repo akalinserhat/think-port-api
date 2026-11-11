@@ -19,13 +19,15 @@ export const proxyService = {
     return getJson<PoolDashboardMetricsDTO>('/admin/proxies/dashboard');
   },
 
-  /** Bağlantı Havuzu SQLite telemetri tablolarına yeni ölçeklenme olayı ve snapshot kaydeder. */
+  /** Bağlantı Havuzu PostgreSQL telemetri tablolarına yeni ölçeklenme olayı ve snapshot kaydeder. */
   async recordPoolEvent(payload: {
     event_type: string;
     provider?: string;
     session_id?: string;
     proxy_id?: string;
+    proxy_endpoint?: string;
     reason?: string;
+    detail?: string;
     total_sessions_after: number;
     dynamic_sessions_after?: number;
     warm_sessions_after?: number;
@@ -34,7 +36,7 @@ export const proxyService = {
     active_proxies?: number;
     cooldown_proxies?: number;
     avg_proxy_latency_ms?: number;
-  }): Promise<{ timeline: PoolDashboardMetricsDTO['timeline']; scaling_events: PoolDashboardMetricsDTO['scaling_events'] }> {
+  }): Promise<PoolDashboardMetricsDTO> {
     return postJson('/admin/proxies/dashboard', payload);
   },
 

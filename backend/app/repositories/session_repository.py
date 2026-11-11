@@ -12,7 +12,7 @@ from app.dtos.admin_dto import (
     ProviderPoolStatDTO,
     ProxyRegionStatDTO,
 )
-from app.repositories.sqlite_db import sqlite_db
+from app.repositories.postgres_db import sqlite_db
 from app.repositories.state_store import InMemoryStateStore
 
 PROVIDER_SHORT_PREFIX: Dict[str, str] = {

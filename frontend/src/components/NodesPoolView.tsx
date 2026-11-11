@@ -38,6 +38,7 @@ import {
   BrowserSessionDTO,
   CreateBrowserSessionRequestDTO,
   PoolDashboardMetricsDTO,
+  PoolScalingEventDTO,
   ProxyNodeDTO,
 } from '../dtos';
 import { proxyService } from '../services';
@@ -457,16 +458,17 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
 
   const [sqliteTelemetry, setSqliteTelemetry] = useState<{
     timeline: PoolDashboardMetricsDTO['timeline'];
-    scaling_events: PoolDashboardMetricsDTO['scaling_events'];
+    recent_events: PoolScalingEventDTO[];
   } | null>(null);
 
   const loadSqlitePoolDashboard = useCallback(async () => {
     try {
       const data = await proxyService.getDashboardMetrics();
-      if (data && (data.timeline?.length || data.scaling_events?.length)) {
+      const events = data?.recent_events || data?.scaling_events || [];
+      if (data && (data.timeline?.length || events.length)) {
         setSqliteTelemetry({
           timeline: data.timeline || [],
-          scaling_events: data.scaling_events || [],
+          recent_events: events,
         });
       }
     } catch {
@@ -522,7 +524,10 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
           avg_proxy_latency_ms: avgLatency,
         });
         if (updated?.timeline) {
-          setSqliteTelemetry(updated);
+          setSqliteTelemetry({
+            timeline: updated.timeline,
+            recent_events: updated.recent_events || updated.scaling_events || [],
+          });
         }
       } catch {
         // Ignore bridge error
@@ -558,7 +563,10 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
           avg_proxy_latency_ms: avgLatency,
         });
         if (updated?.timeline) {
-          setSqliteTelemetry(updated);
+          setSqliteTelemetry({
+            timeline: updated.timeline,
+            recent_events: updated.recent_events || updated.scaling_events || [],
+          });
         }
       } catch {
         // Ignore bridge error
@@ -600,7 +608,10 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
             avg_proxy_latency_ms: avgLatency,
           });
           if (updated?.timeline) {
-            setSqliteTelemetry(updated);
+            setSqliteTelemetry({
+              timeline: updated.timeline,
+              recent_events: updated.recent_events || updated.scaling_events || [],
+            });
           }
         } catch {
           // Ignore bridge error
@@ -766,15 +777,22 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
   }, [proxies]);
 
   const activityFeedEvents = useMemo<DashboardActivityEvent[]>(() => {
-    const rawEvents =
-      sqliteTelemetry?.scaling_events?.length
-        ? sqliteTelemetry.scaling_events
-        : poolDashboard?.scaling_events || [];
+    const rawEvents: PoolScalingEventDTO[] =
+      sqliteTelemetry?.recent_events?.length
+        ? sqliteTelemetry.recent_events
+        : poolDashboard?.recent_events || poolDashboard?.scaling_events || [];
 
-    return rawEvents.map((ev) => {
-      const isScaleUp = ev.event_type === 'scale_up';
-      const isScaleDown = ev.event_type === 'scale_down';
-      const isProxyRotate = ev.event_type === 'proxy_rotate';
+    return rawEvents.map((ev: PoolScalingEventDTO) => {
+      const isScaleUp =
+        ev.event_type === 'scale_up' ||
+        ev.event_type === 'autoscale_up' ||
+        ev.event_type === 'manual_spawn';
+      const isScaleDown =
+        ev.event_type === 'scale_down' ||
+        ev.event_type === 'autoscale_down' ||
+        ev.event_type === 'session_terminated';
+      const isProxyRotate =
+        ev.event_type === 'proxy_rotate' || ev.event_type === 'proxy_cooldown';
 
       const variant: DashboardActivityEvent['variant'] = isScaleUp
         ? 'primary'
@@ -797,17 +815,17 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
         : isScaleDown
           ? `Dinamik Oturum Sonlandırıldı (${ev.provider})`
           : isProxyRotate
-            ? `Proxy Rotasyonu (${ev.proxy_id || ev.provider})`
+            ? `Proxy Rotasyonu (${ev.proxy_endpoint || ev.proxy_id || ev.provider})`
             : `Havuz Sağlık Doğrulaması (${ev.provider})`;
 
-      const tsLabel = ev.timestamp_iso
-        ? ev.timestamp_iso.replace('T', ' ').slice(11, 19)
-        : 'Az önce';
+      const rawTs = ev.created_at || ev.timestamp_iso || '';
+      const tsLabel = rawTs ? rawTs.replace('T', ' ').slice(11, 19) : 'Az önce';
+      const reasonText = ev.detail || ev.reason || '';
 
       return {
         id: ev.id,
         title,
-        description: `${ev.reason} · Kapasite: ${ev.total_sessions_after}/${maxConcurrentBrowsers} (${ev.dynamic_sessions_after} Dinamik)`,
+        description: `${reasonText} · Kapasite: ${ev.total_sessions_after}/${maxConcurrentBrowsers}`,
         timestamp: tsLabel,
         variant,
         badgeText,
@@ -987,7 +1005,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
               <DashboardStatCard
                 title="Ortalama Proxy Gecikmesi"
                 value={`${avgLatency} ms`}
-                subtitle="SQLite Telemetri & Auto-Scale"
+                subtitle="PostgreSQL Telemetri & Auto-Scale"
                 icon={<Activity size={18} />}
                 variant="info"
                 trend={{
@@ -1005,7 +1023,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
                 title="Aktif Oturum Çizelgesi (Sabit + Dinamik)"
                 subtitle={`Toplam oturum, meşgul işçiler ve dinamik ölçeklenme (Kapasite: ${maxConcurrentBrowsers})`}
                 icon={<MonitorCheck size={17} />}
-                badge="SQLite Telemetri"
+                badge="PostgreSQL Telemetri"
                 data={timelinePoints}
                 xKey="time_label"
                 maxY={maxConcurrentBrowsers}
@@ -1077,7 +1095,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
 
               <DashboardActivityFeedView
                 title="Auto-Scale & Havuz Olayları"
-                subtitle="SQLite kayıtlı gerçek zamanlı ölçeklenme hareketleri"
+                subtitle="PostgreSQL kayıtlı gerçek zamanlı ölçeklenme hareketleri"
                 icon={<Zap size={17} />}
                 badge={`${activityFeedEvents.length} Kayıt`}
                 events={activityFeedEvents}
@@ -1217,7 +1235,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
         submitButtonText={modalTabId === 1 ? t('nodes.saveProxyBtn') : t('nodes.importListBtn')}
         onSave={handleSaveModal}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div className="flex-col gap-16">
           <TabLayout
             tabs={[
               { id: 1, title: t('nodes.tabSingle'), icon: <ShieldCheck size={15} /> },
@@ -1228,8 +1246,8 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
           />
 
           {modalTabId === 1 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '14px' }}>
+            <div className="flex-col gap-16">
+              <div className="form-grid-2">
                 <div className="form-group">
                   <label>{t('nodes.fieldProtocol')}</label>
                   <select
@@ -1255,7 +1273,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+              <div className="form-grid-2">
                 <div className="form-group">
                   <label>{t('nodes.fieldCountry')}</label>
                   <select
@@ -1285,7 +1303,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+              <div className="form-grid-2">
                 <div className="form-group">
                   <label>{t('nodes.fieldType')}</label>
                   <select
@@ -1311,8 +1329,8 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
               </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+            <div className="flex-col gap-16">
+              <div className="dashboard-grid-3">
                 <div className="form-group">
                   <label>{t('nodes.fieldProtocol')}</label>
                   <select
@@ -1373,7 +1391,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
         submitButtonText="Dinamik Oturumu Başlat"
         onSave={handleSpawnSessionModal}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div className="flex-col gap-16">
           <div className="form-group">
             <label>Hedef AI Sağlayıcısı (Web Bridge)</label>
             <select
@@ -1407,7 +1425,7 @@ export const NodesPoolView: React.FC<NodesPoolViewProps> = ({
             </select>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '12px' }}>
+          <div className="form-grid-2">
             <div className="form-group">
               <label>Hesap Etiketi (İsteğe Bağlı)</label>
               <BaseInput

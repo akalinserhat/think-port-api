@@ -69,7 +69,7 @@ function spawnFastApiProcess(): void {
 }
 
 function runSqliteBridge(payload: Record<string, unknown>): { status: number; body: string } {
-  const bridgeScript = path.resolve(__dirname, '../backend/app/repositories/sqlite_cli_bridge.py');
+  const bridgeScript = path.resolve(__dirname, '../backend/app/repositories/postgres_cli_bridge.py');
   const proc = spawnSync(resolvePythonBin(), [bridgeScript], {
     input: JSON.stringify(payload),
     encoding: 'utf-8',
@@ -839,6 +839,189 @@ function optionalPeerStubPlugin(): Plugin {
         });
       });
 
+      const handleAiAgentsMiddleware = (req: any, res: any) => {
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const subPath = parsedUrl.pathname.replace(/^\/+/, '');
+
+        if (req.method === 'GET' && !subPath) {
+          const result = runSqliteBridge({ action: 'ai_agents_list' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'GET' && subPath) {
+          const result = runSqliteBridge({
+            action: 'ai_agents_get',
+            agent_id: decodeURIComponent(subPath),
+          });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'DELETE' && subPath) {
+          const result = runSqliteBridge({
+            action: 'ai_agents_delete',
+            agent_id: decodeURIComponent(subPath),
+          });
+          let parsedRes: Record<string, unknown> = {};
+          try {
+            parsedRes = JSON.parse(result.body || '{}');
+          } catch { }
+          if (parsedRes.error) {
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ detail: parsedRes.error, mesaj: parsedRes.error }));
+            return;
+          }
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk: any) => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          let parsedBody: Record<string, unknown> = {};
+          try {
+            parsedBody = JSON.parse(body || '{}');
+          } catch { }
+
+          if (req.method === 'POST' && !subPath) {
+            const result = runSqliteBridge({
+              action: 'ai_agents_create',
+              body: parsedBody,
+            });
+            let parsedRes: Record<string, unknown> = {};
+            try {
+              parsedRes = JSON.parse(result.body || '{}');
+            } catch { }
+            if (parsedRes.error) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.end(JSON.stringify({ detail: parsedRes.error, mesaj: parsedRes.error }));
+              return;
+            }
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          if ((req.method === 'PUT' || req.method === 'PATCH') && subPath) {
+            const result = runSqliteBridge({
+              action: 'ai_agents_update',
+              agent_id: decodeURIComponent(subPath),
+              body: parsedBody,
+            });
+            let parsedRes: Record<string, unknown> = {};
+            try {
+              parsedRes = JSON.parse(result.body || '{}');
+            } catch { }
+            if (parsedRes.error) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.end(JSON.stringify({ detail: parsedRes.error, mesaj: parsedRes.error }));
+              return;
+            }
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ detail: 'Method not allowed' }));
+        });
+      };
+
+      server.middlewares.use('/api/AiAjanlar', handleAiAgentsMiddleware);
+      server.middlewares.use('/admin/agents', handleAiAgentsMiddleware);
+
+      server.middlewares.use('/api/AiSaglayicilar', (req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const subPath = parsedUrl.pathname.replace(/^\/+/, '');
+
+        if (req.method === 'GET' && !subPath) {
+          const result = runSqliteBridge({ action: 'ai_providers_list' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        const fetchModelsMatch = subPath.match(/^([^/]+)\/fetch-models$/i);
+        if (req.method === 'POST' && fetchModelsMatch) {
+          const result = runSqliteBridge({
+            action: 'ai_providers_fetch_models',
+            provider_id: decodeURIComponent(fetchModelsMatch[1]),
+          });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.end(JSON.stringify({ detail: 'Not found' }));
+      });
+
+      server.middlewares.use('/api/AiAraclar', (req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const subPath = parsedUrl.pathname.replace(/^\/+/, '');
+
+        if (req.method === 'GET' && subPath === 'katalog') {
+          const result = runSqliteBridge({ action: 'ai_tools_catalog' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'GET' && subPath === 'sablonlar') {
+          const result = runSqliteBridge({ action: 'ai_tools_templates' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        const setToolsMatch = subPath.match(/^ajan\/([^/]+)\/araclar$/i);
+        if (req.method === 'POST' && setToolsMatch) {
+          let body = '';
+          req.on('data', (chunk) => {
+            body += chunk;
+          });
+          req.on('end', () => {
+            let parsedBody: unknown = [];
+            try {
+              parsedBody = JSON.parse(body || '[]');
+            } catch { }
+            const result = runSqliteBridge({
+              action: 'ai_agents_set_tools',
+              agent_id: decodeURIComponent(setToolsMatch[1]),
+              body: parsedBody,
+            });
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+          });
+          return;
+        }
+
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.end(JSON.stringify({ detail: 'Not found' }));
+      });
+
       server.middlewares.use('/admin/smtp', (req, res) => {
         const parsedUrl = new URL(req.url || '/', 'http://localhost');
         const subPath = parsedUrl.pathname.replace(/^\/+/, '');
@@ -991,6 +1174,10 @@ export default defineConfig({
         replacement: path.resolve(__dirname, 'node_modules/@akalin/ai-assistants/src/index.ts'),
       },
       {
+        find: /^@akalin\/ai[-_]management[-_]module$/,
+        replacement: path.resolve(__dirname, 'node_modules/@akalin/ai_management_module/src/index.ts'),
+      },
+      {
         find: /^@akalin\/ui$/,
         replacement: path.resolve(__dirname, 'node_modules/@akalin/ui/src/index.ts'),
       },
@@ -1022,6 +1209,8 @@ export default defineConfig({
     force: true,
     exclude: [
       '@akalin/ai-assistants',
+      '@akalin/ai_management_module',
+      '@akalin/ai-management-module',
       '@akalin/ui',
       '@akalin/module_core',
       '@akalin/module-core',

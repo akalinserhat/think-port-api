@@ -1,7 +1,7 @@
 from typing import List, Optional
 from app.dtos.api_key_dto import ApiKeyRecordDTO, ApiKeyPublicDTO
 from app.repositories.state_store import InMemoryStateStore
-from app.repositories.sqlite_db import sqlite_db
+from app.repositories.postgres_db import sqlite_db
 
 
 class ApiKeyRepository:

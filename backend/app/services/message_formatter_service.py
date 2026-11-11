@@ -142,39 +142,49 @@ class MessageFormatterService:
         is_json = cls.is_json_mode_requested(response_format)
         json_suffix = cls.build_json_enforcement_suffix(response_format) if is_json else ""
 
-        # Son kullanıcı mesajını bul ve zenginleştir
-        target_idx: Optional[int] = None
-        for idx in range(len(copied) - 1, -1, -1):
-            if copied[idx].get("role") == "user":
-                target_idx = idx
-                break
+        # İlk kullanıcı mesajına sistem yönergesini, son kullanıcı mesajına ise JSON zorunluluğunu ekle
+        first_user_idx: Optional[int] = None
+        last_user_idx: Optional[int] = None
+        for idx, msg_item in enumerate(copied):
+            if msg_item.get("role") == "user":
+                if first_user_idx is None:
+                    first_user_idx = idx
+                last_user_idx = idx
 
-        if target_idx is None:
+        if first_user_idx is None or last_user_idx is None:
             return copied
 
-        target_msg = copied[target_idx]
-        content = target_msg.get("content", "")
-        if isinstance(content, str):
-            updated = content
-            if combined_sys and SYSTEM_INSTRUCTION_HEADER not in updated and combined_sys[:80] not in updated:
-                updated = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{updated}"
-            if json_suffix and "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in updated:
-                updated = f"{updated}{json_suffix}"
-            target_msg["content"] = updated
-        elif isinstance(content, list):
-            new_parts = [dict(p) for p in content]
-            # İlk metin parçasına sistem yönergesini, son metin parçasına JSON zorunluluğunu ekle
-            text_indices = [i for i, p in enumerate(new_parts) if p.get("type") == "text"]
-            if text_indices:
-                first_ti = text_indices[0]
-                first_txt = str(new_parts[first_ti].get("text", ""))
-                if combined_sys and SYSTEM_INSTRUCTION_HEADER not in first_txt and combined_sys[:80] not in first_txt:
-                    new_parts[first_ti]["text"] = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{first_txt}"
-                last_ti = text_indices[-1]
-                last_txt = str(new_parts[last_ti].get("text", ""))
-                if json_suffix and "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in last_txt:
-                    new_parts[last_ti]["text"] = f"{last_txt}{json_suffix}"
-            target_msg["content"] = new_parts
+        if combined_sys:
+            first_msg = copied[first_user_idx]
+            f_content = first_msg.get("content", "")
+            if isinstance(f_content, str):
+                if SYSTEM_INSTRUCTION_HEADER not in f_content and combined_sys[:80] not in f_content:
+                    first_msg["content"] = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{f_content}"
+            elif isinstance(f_content, list):
+                new_parts = [dict(p) for p in f_content]
+                text_indices = [i for i, p in enumerate(new_parts) if p.get("type") == "text"]
+                if text_indices:
+                    first_ti = text_indices[0]
+                    first_txt = str(new_parts[first_ti].get("text", ""))
+                    if SYSTEM_INSTRUCTION_HEADER not in first_txt and combined_sys[:80] not in first_txt:
+                        new_parts[first_ti]["text"] = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{first_txt}"
+                first_msg["content"] = new_parts
+
+        if json_suffix:
+            last_msg = copied[last_user_idx]
+            l_content = last_msg.get("content", "")
+            if isinstance(l_content, str):
+                if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in l_content:
+                    last_msg["content"] = f"{l_content}{json_suffix}"
+            elif isinstance(l_content, list):
+                new_parts = [dict(p) for p in l_content]
+                text_indices = [i for i, p in enumerate(new_parts) if p.get("type") == "text"]
+                if text_indices:
+                    last_ti = text_indices[-1]
+                    last_txt = str(new_parts[last_ti].get("text", ""))
+                    if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in last_txt:
+                        new_parts[last_ti]["text"] = f"{last_txt}{json_suffix}"
+                last_msg["content"] = new_parts
 
         # Sistem yönergesi kullanıcı mesajına eklendiği için mükerrer (2x token) gönderimi önlemek adına ayrı system mesajlarını çıkar
         if combined_sys:
@@ -299,9 +309,9 @@ class MessageFormatterService:
         text_only_msgs: List[Dict[str, str]],
         system_instructions: str,
     ) -> None:
-        """Sistem talimatlarını son kullanıcı mesajının en üstüne `[SYSTEM INSTRUCTIONS - MUST FOLLOW STRICTLY]:` başlığıyla ekler."""
+        """Sistem talimatlarını ilk kullanıcı mesajının en üstüne `[SYSTEM INSTRUCTIONS - MUST FOLLOW STRICTLY]:` başlığıyla ekler."""
         prefix_block = f"{SYSTEM_INSTRUCTION_HEADER}\n{system_instructions}\n\n"
-        for idx in range(len(text_only_msgs) - 1, -1, -1):
+        for idx in range(len(text_only_msgs)):
             if text_only_msgs[idx].get("role") == "user":
                 current_txt = text_only_msgs[idx].get("content", "")
                 if SYSTEM_INSTRUCTION_HEADER not in current_txt and system_instructions[:80] not in current_txt:
@@ -503,7 +513,7 @@ class MessageFormatterService:
                             raw_args,
                         )
                         repaired_args = re.sub(
-                            r'\}\s*\]\s*,\s*(?="(?:kodu|kod|adi|ad|kampanyaKodu|kuralAlani)"\s*:)',
+                            r'\}\s*\]\s*,\s*(?="[a-zA-Z_][a-zA-Z0-9_]*"\s*:)',
                             "}]},{",
                             repaired_args,
                         )
@@ -972,11 +982,12 @@ class MessageFormatterService:
         # Ekli belge varsa önce belge metnini, ardından kullanıcının talimatını da sona yerleştirerek
         # uzun PDF metinlerinden sonra modelin asıl görevi unutmasını engelle.
         if doc_segments and text_segments:
+            user_task_reminder = "\n\n".join(t.strip() for t in text_segments if t.strip()).strip()
             combined_segments = (
                 text_segments
                 + doc_segments
                 + [
-                    "[GÖREV HATIRLATMASI]: Yukarıdaki ekli belge içeriğini başta verilen sistem ve kullanıcı kurallarına birebir uyarak işle."
+                    f"[GÖREV HATIRLATMASI — YUKARIDAKİ EKLİ BELGEYİ AŞAĞIDAKİ KULLANICI VE SİSTEM TALİMATINA BİREBİR UYARAK İŞLE]:\n{user_task_reminder}"
                 ]
             )
             return combined_segments, image_parts

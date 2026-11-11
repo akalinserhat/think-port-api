@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -36,3 +37,6 @@ class AuthenticatedUserContextDTO(BaseModel):
     tokens_used: int
     rpm_limit: int
     concurrent_limit: int
+    app_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    raw_api_key: Optional[str] = None

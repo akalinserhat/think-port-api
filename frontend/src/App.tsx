@@ -26,6 +26,7 @@ import {
   proxyService,
   systemUserService,
 } from './services';
+import { ModelRegistry } from './models';
 
 const TAB_ROUTES: Record<ActiveTab, string> = {
   chat: '/chat',
@@ -47,40 +48,7 @@ function resolveTabFromPathname(pathname: string): ActiveTab {
 }
 
 const INITIAL_FALLBACK_STATE: AdminStateResponseDTO = {
-  models: [
-    {
-      id: 'gpt-4o',
-      name: 'GPT-4o (Web Gateway)',
-      vendor: 'OpenAI',
-      provider: 'chatgpt-web',
-      badge: 'Web AI',
-      description: 'OpenAI GPT-4o web session bridge.',
-    },
-    {
-      id: 'claude-3-5-sonnet',
-      name: 'Claude 3.5 Sonnet (Web Gateway)',
-      vendor: 'Anthropic',
-      provider: 'claude-web',
-      badge: 'Web AI',
-      description: 'Anthropic Claude 3.5 Sonnet web session bridge.',
-    },
-    {
-      id: 'deepseek-r1',
-      name: 'DeepSeek R1 (Web Gateway)',
-      vendor: 'DeepSeek',
-      provider: 'deepseek-web',
-      badge: 'Reasoning',
-      description: 'DeepSeek R1 Chain-of-Thought web bridge.',
-    },
-    {
-      id: 'gemini-2.5-pro',
-      name: 'Gemini 2.5 Pro (Web Gateway)',
-      vendor: 'Google',
-      provider: 'gemini-web',
-      badge: 'Web AI',
-      description: 'Google Gemini web session & local Gemma 4 bridge.',
-    },
-  ],
+  models: ModelRegistry.toDTOList(),
   users: [
     {
       id: 'sys_usr_01',
@@ -262,7 +230,7 @@ export const App: React.FC = () => {
             : prev.proxies;
         const incomingModels =
           Array.isArray(data.models) && data.models.length > 0
-            ? data.models
+            ? ModelRegistry.toDTOList(data.models)
             : prev.models;
         const serverIds = new Set(incomingSessions.map((s) => s.id));
         const localDynamic = prev.browser_sessions.filter(
@@ -609,9 +577,11 @@ export const App: React.FC = () => {
           {activeTab === 'settings' && (
             <SettingsView
               settings={adminState.settings}
+              models={adminState.models}
               users={effectiveUsers}
               systemUsers={systemUsers}
               currentAuthUser={currentAuthUser}
+              onSelectModel={setSelectedModelId}
               onSaveSettings={handleSaveSettings}
               onRefreshState={refreshState}
               onRefreshSystemUsers={refreshSystemUsers}

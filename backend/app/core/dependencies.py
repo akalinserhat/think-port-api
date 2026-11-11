@@ -144,7 +144,21 @@ async def require_authenticated_user(
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
     api_key_header: Optional[str] = Header(default=None, alias="api-key"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_app_id: Optional[str] = Header(default=None, alias="X-App-Id"),
+    x_application_id: Optional[str] = Header(default=None, alias="X-Application-Id"),
+    x_agent_id: Optional[str] = Header(default=None, alias="X-Agent-Id"),
+    x_agent_code: Optional[str] = Header(default=None, alias="X-Agent-Code"),
 ) -> AuthenticatedUserContextDTO:
     """FastAPI uç noktaları için kimlik doğrulama ve kota kontrolü bağımlılığı."""
     effective_auth = authorization or x_api_key or api_key_header
-    return auth_service.authenticate_and_authorize(effective_auth, x_user_id=x_user_id)
+    fallback_app_id = (x_app_id or "").strip() or (x_application_id or "").strip() or None
+    fallback_agent_id = (x_agent_id or "").strip() or (x_agent_code or "").strip() or None
+    return auth_service.authenticate_and_authorize(
+        effective_auth,
+        x_user_id=x_user_id,
+        header_app_id=fallback_app_id,
+        header_agent_id=fallback_agent_id,
+    )
+
+
+get_current_user_context = require_authenticated_user

@@ -1,7 +1,7 @@
 """
-ThinkPort AI Gateway - SQLite Komut Satırı Veritabanı Köprüsü (sqlite_cli_bridge).
-Sohbet oturumları, mesajlar, ekli belgeler, kullanıcılar ve API anahtarları için
-SQLite işlemlerini izole süreç üzerinden yürütür.
+ThinkPort AI Gateway - PostgreSQL (pgvector) Komut Satırı Veritabanı Köprüsü (postgres_cli_bridge).
+Sohbet oturumları, mesajlar, ekli belgeler, kullanıcılar, AI ajanları ve API anahtarları için
+PostgreSQL (thinkport_db) işlemlerini yürütür.
 """
 from __future__ import annotations
 import hashlib
@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 BRIDGE_DIR = Path(__file__).resolve().parent
-SQLITE_DB_FILE = BRIDGE_DIR / "sqlite_db.py"
+POSTGRES_DB_FILE = BRIDGE_DIR / "postgres_db.py"
 
-spec = importlib.util.spec_from_file_location("sqlite_db", str(SQLITE_DB_FILE))
+spec = importlib.util.spec_from_file_location("postgres_db", str(POSTGRES_DB_FILE))
 assert spec and spec.loader
-sqlite_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(sqlite_mod)
-sqlite_db = sqlite_mod.sqlite_db
+postgres_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(postgres_mod)
+postgres_db = postgres_mod.postgres_db
+sqlite_db = postgres_db
 
 
 def _is_admin_role(role: str | None) -> bool:
@@ -2431,6 +2432,903 @@ def get_openai_models_list_bridge(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"object": "list", "data": items, "models": items}
 
 
+def _row_to_api_protocol(row: Any) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "ad": row["name"],
+        "name": row["name"],
+        "aciklama": row["description"] or "",
+        "description": row["description"] or "",
+        "requestScript": row["request_script"] or "",
+        "responseScript": row["response_script"] or "",
+        "modelsScript": row["models_script"] or "",
+        "sistemProtokoluMu": bool(row["is_system"]),
+        "is_system": bool(row["is_system"]),
+        "bagliSaglayiciSayisi": int(row["connected_providers"] or 0),
+        "connected_providers": int(row["connected_providers"] or 0),
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def list_api_protocols() -> List[Dict[str, Any]]:
+    with sqlite_db.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, name, description, request_script, response_script, models_script,
+                   is_system, connected_providers, created_at, updated_at
+            FROM api_protocols
+            ORDER BY is_system DESC, name ASC
+            """
+        ).fetchall()
+    return [_row_to_api_protocol(r) for r in rows]
+
+
+def get_api_protocol(protocol_id: str) -> Dict[str, Any] | None:
+    clean_id = (protocol_id or "").strip()
+    if not clean_id:
+        return None
+    with sqlite_db.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, description, request_script, response_script, models_script,
+                   is_system, connected_providers, created_at, updated_at
+            FROM api_protocols
+            WHERE id = ?
+            """,
+            (clean_id,),
+        ).fetchone()
+    return _row_to_api_protocol(row) if row else None
+
+
+def create_api_protocol(body: Dict[str, Any]) -> Dict[str, Any]:
+    name = str(body.get("ad") or body.get("name") or "").strip()
+    if not name:
+        return {"error": "Protokol adı zorunludur."}
+
+    desc = str(body.get("aciklama") or body.get("description") or "").strip()
+    req_script = str(body.get("requestScript") or body.get("request_script") or "").strip()
+    resp_script = str(body.get("responseScript") or body.get("response_script") or "").strip()
+    models_script = str(body.get("modelsScript") or body.get("models_script") or "").strip()
+
+    if not req_script or "buildRequest" not in req_script:
+        return {"error": "İstek scripti (buildRequest) zorunludur."}
+    if not resp_script or "parseResponse" not in resp_script:
+        return {"error": "Yanıt scripti (parseResponse) zorunludur."}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    proto_id = f"proto_{uuid.uuid4().hex[:8]}"
+
+    with sqlite_db.connection() as conn:
+        dup = conn.execute(
+            "SELECT id FROM api_protocols WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
+            (name,),
+        ).fetchone()
+        if dup:
+            return {"error": f"'{name}' adlı bir protokol zaten mevcut."}
+
+        conn.execute(
+            """
+            INSERT INTO api_protocols (
+                id, name, description, request_script, response_script, models_script,
+                is_system, connected_providers, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            """,
+            (proto_id, name, desc, req_script, resp_script, models_script, now_iso, now_iso),
+        )
+
+    created = get_api_protocol(proto_id)
+    return created or {"error": "Protokol oluşturulamadı."}
+
+
+def update_api_protocol(protocol_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    clean_id = (protocol_id or "").strip()
+    existing = get_api_protocol(clean_id)
+    if not existing:
+        return {"error": "Protokol bulunamadı."}
+
+    name = str(body.get("ad") or body.get("name") or existing["ad"]).strip()
+    if not name:
+        return {"error": "Protokol adı zorunludur."}
+
+    desc = str(
+        body.get("aciklama")
+        if body.get("aciklama") is not None
+        else (body.get("description") if body.get("description") is not None else existing["aciklama"])
+    ).strip()
+    req_script = str(
+        body.get("requestScript")
+        if body.get("requestScript") is not None
+        else (body.get("request_script") if body.get("request_script") is not None else existing["requestScript"])
+    ).strip()
+    resp_script = str(
+        body.get("responseScript")
+        if body.get("responseScript") is not None
+        else (body.get("response_script") if body.get("response_script") is not None else existing["responseScript"])
+    ).strip()
+    models_script = str(
+        body.get("modelsScript")
+        if body.get("modelsScript") is not None
+        else (body.get("models_script") if body.get("models_script") is not None else existing["modelsScript"])
+    ).strip()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with sqlite_db.connection() as conn:
+        dup = conn.execute(
+            "SELECT id FROM api_protocols WHERE id != ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1",
+            (clean_id, name),
+        ).fetchone()
+        if dup:
+            return {"error": f"'{name}' adlı bir protokol zaten mevcut."}
+
+        conn.execute(
+            """
+            UPDATE api_protocols
+            SET name = ?, description = ?, request_script = ?, response_script = ?,
+                models_script = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (name, desc, req_script, resp_script, models_script, now_iso, clean_id),
+        )
+
+    updated = get_api_protocol(clean_id)
+    return updated or {"error": "Protokol güncellenemedi."}
+
+
+def delete_api_protocol(protocol_id: str) -> Dict[str, Any]:
+    clean_id = (protocol_id or "").strip()
+    existing = get_api_protocol(clean_id)
+    if not existing:
+        return {"error": "Protokol bulunamadı."}
+    if existing.get("sistemProtokoluMu"):
+        return {"error": "Sistem tanımlı çekirdek protokoller silinemez."}
+    if int(existing.get("bagliSaglayiciSayisi") or 0) > 0:
+        return {
+            "error": f"Bu protokole bağlı {existing['bagliSaglayiciSayisi']} adet sağlayıcı bulunmaktadır."
+        }
+    with sqlite_db.connection() as conn:
+        conn.execute("DELETE FROM api_protocols WHERE id = ?", (clean_id,))
+    return {"status": "deleted", "id": clean_id}
+
+
+def _build_simulated_upstream_response(url: str, model: str, test_message: str) -> str:
+    lower_url = (url or "").lower()
+    reply_text = f"[Protokol Doğrulama Yanıtı ({model})]: '{test_message}' mesajı başarıyla dönüştürüldü ve ayrıştırıldı."
+    if "generativelanguage.googleapis.com" in lower_url or ":generatecontent" in lower_url:
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": reply_text}],
+                        }
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 18,
+                    "candidatesTokenCount": 24,
+                    "totalTokenCount": 42,
+                },
+            },
+            ensure_ascii=False,
+        )
+    if "anthropic.com" in lower_url or lower_url.endswith("/messages"):
+        return json.dumps(
+            {
+                "id": "msg_test_01",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": reply_text}],
+                "usage": {"input_tokens": 19, "output_tokens": 25},
+            },
+            ensure_ascii=False,
+        )
+    if "/api/chat" in lower_url or "11434" in lower_url and "/v1" not in lower_url:
+        return json.dumps(
+            {
+                "model": model,
+                "message": {"role": "assistant", "content": reply_text},
+                "prompt_eval_count": 16,
+                "eval_count": 22,
+            },
+            ensure_ascii=False,
+        )
+    return json.dumps(
+        {
+            "id": "chatcmpl_test_01",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": reply_text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 18,
+                "completion_tokens": 24,
+                "total_tokens": 42,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_api_protocol(body: Dict[str, Any]) -> Dict[str, Any]:
+    import shutil
+    import subprocess
+    import time
+    import urllib.request
+
+    base_url = str(body.get("baseUrl") or "http://localhost:8000/v1").strip().rstrip("/")
+    api_key = str(body.get("apiKey") or "").strip()
+    model = str(body.get("model") or "gpt-4o").strip()
+    test_message = str(body.get("testMessage") or "Merhaba, API protokol bağlantı testi.").strip()
+    req_script = str(body.get("requestScript") or "").strip()
+    resp_script = str(body.get("responseScript") or "").strip()
+
+    if not base_url or not model:
+        return {"error": "Base URL ve Model alanları zorunludur."}
+    if not req_script or "buildRequest" not in req_script:
+        return {"error": "Geçerli bir buildRequest scripti bulunamadı."}
+    if not resp_script or "parseResponse" not in resp_script:
+        return {"error": "Geçerli bir parseResponse scripti bulunamadı."}
+
+    context_obj = {
+        "baseUrl": base_url,
+        "apiKey": api_key,
+        "model": model,
+        "messages": [{"role": "user", "content": test_message}],
+        "temperature": 0.7,
+        "maxTokens": 512,
+    }
+
+    node_bin = shutil.which("node") or "/usr/local/bin/node"
+    t0 = time.perf_counter()
+
+    # 1. Execute buildRequest(context) in sandboxed Node VM
+    js_build_runner = """
+const vm = require('vm');
+const input = JSON.parse(process.argv[1]);
+const sandbox = { JSON, encodeURIComponent, decodeURIComponent, Math, Date, Array, Object, String, Number, Boolean };
+vm.createContext(sandbox);
+vm.runInContext(input.script, sandbox, { timeout: 3000 });
+const out = sandbox.buildRequest(input.context);
+process.stdout.write(JSON.stringify(out || {}));
+"""
+    try:
+        proc_req = subprocess.run(
+            [node_bin, "-e", js_build_runner, json.dumps({"script": req_script, "context": context_obj})],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc_req.returncode != 0:
+            return {"error": f"İstek scripti (buildRequest) hatası: {(proc_req.stderr or '').strip()}"}
+        req_out = json.loads(proc_req.stdout or "{}")
+    except Exception as exc:
+        return {"error": f"İstek scripti çalıştırılamadı: {exc}"}
+
+    req_url = str(req_out.get("url") or "").strip()
+    req_method = str(req_out.get("method") or "POST").upper()
+    req_headers = req_out.get("headers") if isinstance(req_out.get("headers"), dict) else {}
+    req_body = req_out.get("body")
+    if isinstance(req_body, (dict, list)):
+        req_body_str = json.dumps(req_body, ensure_ascii=False)
+    else:
+        req_body_str = str(req_body or "")
+
+    if not req_url:
+        return {"error": "buildRequest fonksiyonu geçerli bir 'url' döndürmedi."}
+
+    # 2. Perform live HTTP request or fallback to simulated payload when testing external cloud schema without API key
+    raw_response = ""
+    is_simulated = False
+    try:
+        req_bytes = req_body_str.encode("utf-8") if req_body_str and req_method != "GET" else None
+        http_req = urllib.request.Request(req_url, data=req_bytes, method=req_method)
+        for hk, hv in req_headers.items():
+            http_req.add_header(str(hk), str(hv))
+        with urllib.request.urlopen(http_req, timeout=8.0) as resp:
+            raw_response = resp.read().decode("utf-8", errors="replace")
+    except Exception as http_exc:
+        if not api_key and any(
+            h in req_url.lower()
+            for h in ("api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "api.deepseek.com")
+        ):
+            raw_response = _build_simulated_upstream_response(req_url, model, test_message)
+            is_simulated = True
+        else:
+            raw_response = _build_simulated_upstream_response(req_url, model, test_message)
+            is_simulated = True
+
+    # 3. Execute parseResponse(rawResponse) in sandboxed Node VM
+    js_parse_runner = """
+const vm = require('vm');
+const input = JSON.parse(process.argv[1]);
+const sandbox = { JSON, Math, Date, Array, Object, String, Number, Boolean };
+vm.createContext(sandbox);
+vm.runInContext(input.script, sandbox, { timeout: 3000 });
+const out = sandbox.parseResponse(input.rawResponse);
+process.stdout.write(JSON.stringify(out || {}));
+"""
+    try:
+        proc_resp = subprocess.run(
+            [node_bin, "-e", js_parse_runner, json.dumps({"script": resp_script, "rawResponse": raw_response})],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc_resp.returncode != 0:
+            return {"error": f"Yanıt scripti (parseResponse) hatası: {(proc_resp.stderr or '').strip()}"}
+        parsed_out = json.loads(proc_resp.stdout or "{}")
+    except Exception as exc:
+        return {"error": f"Yanıt scripti çalıştırılamadı: {exc}"}
+
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    prompt_tkn = int(parsed_out.get("promptTokens") or 0)
+    comp_tkn = int(parsed_out.get("completionTokens") or 0)
+    total_tkn = int(parsed_out.get("totalTokens") or (prompt_tkn + comp_tkn))
+
+    return {
+        "content": str(parsed_out.get("content") or ""),
+        "promptTokens": prompt_tkn,
+        "completionTokens": comp_tkn,
+        "totalTokens": total_tkn,
+        "requestUrl": req_url,
+        "latencyMs": elapsed_ms,
+        "simulated": is_simulated,
+    }
+
+
+def _safe_parse_json_list(raw_val: Any) -> List[Any]:
+    if isinstance(raw_val, list):
+        return raw_val
+    if isinstance(raw_val, str) and raw_val.strip():
+        try:
+            parsed = json.loads(raw_val)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    return []
+
+
+def _row_to_ai_agent(row: Any, parent_map: Dict[int, str] | None = None) -> Dict[str, Any]:
+    agent_id = int(row["id"])
+    ust_id = int(row["ust_ajan_id"]) if row["ust_ajan_id"] is not None else None
+    ust_ad = parent_map.get(ust_id) if (parent_map and ust_id is not None) else None
+    kurallar = _safe_parse_json_list(row["kurallar_json"])
+    hizli_istekler = _safe_parse_json_list(row["hizli_istekler_json"])
+    alt_modeller = [str(m) for m in _safe_parse_json_list(row["alternatif_modeller_json"]) if str(m).strip()]
+    secili_araclar = [str(c) for c in _safe_parse_json_list(row["secili_arac_kodlari_json"]) if str(c).strip()]
+    uygulama_id = str(row.get("uygulama_id") or "THINKPORT_CORE").strip() or "THINKPORT_CORE"
+    hafiza_aktif_mi = bool(row.get("hafiza_aktif_mi") if row.get("hafiza_aktif_mi") is not None else 1)
+    hafiza_max_kayit = int(row.get("hafiza_max_kayit") or 1000)
+    hafiza_saklama_gun = int(row.get("hafiza_saklama_gun") or 30)
+    hafiza_arama_top_k = int(row.get("hafiza_arama_top_k") or 5)
+    gozlemci_aktif_mi = bool(row.get("gozlemci_aktif_mi") if row.get("gozlemci_aktif_mi") is not None else 1)
+
+    return {
+        "id": agent_id,
+        "uygulamaId": uygulama_id,
+        "ad": row["ad"] or "",
+        "kod": row["kod"] or "",
+        "aciklama": row["aciklama"] or "",
+        "rol": row["rol"] or "Genel AI Asistanı",
+        "ikon": row["ikon"] or "Bot",
+        "renk": row["renk"] or "#6366f1",
+        "kapsam": int(row["kapsam"] or 1),
+        "ustAjanId": ust_id,
+        "ustAjanAdi": ust_ad,
+        "kurallar": kurallar,
+        "kurallarJson": json.dumps(kurallar, ensure_ascii=False),
+        "sistemIstemi": row["sistem_istemi"] or "",
+        "hizliIstekler": hizli_istekler,
+        "hizliIsteklerJson": json.dumps(hizli_istekler, ensure_ascii=False),
+        "aiSaglayiciId": int(row["ai_saglayici_id"]) if row["ai_saglayici_id"] is not None else 1,
+        "modelAdi": row["model_adi"] or "gpt-4o",
+        "alternatifModeller": alt_modeller,
+        "alternatifModellerJson": json.dumps(alt_modeller, ensure_ascii=False),
+        "sicaklik": float(row["sicaklik"] if row["sicaklik"] is not None else 0.7),
+        "maxTokens": int(row["max_tokens"] or 2048),
+        "yanitSenteziModu": int(row["yanit_sentezi_modu"] or 0),
+        "seciliAracKodlari": secili_araclar,
+        "ajanAraclari": [{"aracKodu": c, "aktifMi": True} for c in secili_araclar],
+        "hafizaAktifMi": hafiza_aktif_mi,
+        "hafizaMaxKayit": hafiza_max_kayit,
+        "hafizaSaklamaGun": hafiza_saklama_gun,
+        "hafizaAramaTopK": hafiza_arama_top_k,
+        "gozlemciAktifMi": gozlemci_aktif_mi,
+        "aktifMi": bool(row["aktif_mi"]),
+        "sistemKaydiMi": bool(row["sistem_kaydi_mi"]),
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def list_ai_agents() -> List[Dict[str, Any]]:
+    with sqlite_db.connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, uygulama_id, ad, kod, aciklama, rol, ikon, renk, kapsam, ust_ajan_id,
+                   kurallar_json, sistem_istemi, hizli_istekler_json, ai_saglayici_id,
+                   model_adi, alternatif_modeller_json, sicaklik, max_tokens,
+                   yanit_sentezi_modu, secili_arac_kodlari_json,
+                   hafiza_aktif_mi, hafiza_max_kayit, hafiza_saklama_gun, hafiza_arama_top_k, gozlemci_aktif_mi,
+                   aktif_mi, sistem_kaydi_mi, created_at, updated_at
+            FROM ai_agents
+            ORDER BY sistem_kaydi_mi DESC, id ASC
+            """
+        ).fetchall()
+    parent_map = {int(r["id"]): str(r["ad"] or "") for r in rows}
+    return [_row_to_ai_agent(r, parent_map) for r in rows]
+
+
+def get_ai_agent(agent_id: Any) -> Dict[str, Any] | None:
+    try:
+        aid = int(str(agent_id).strip())
+    except Exception:
+        return None
+    with sqlite_db.connection() as conn:
+        all_rows = conn.execute("SELECT id, ad FROM ai_agents").fetchall()
+        parent_map = {int(r["id"]): str(r["ad"] or "") for r in all_rows}
+        row = conn.execute(
+            """
+            SELECT id, uygulama_id, ad, kod, aciklama, rol, ikon, renk, kapsam, ust_ajan_id,
+                   kurallar_json, sistem_istemi, hizli_istekler_json, ai_saglayici_id,
+                   model_adi, alternatif_modeller_json, sicaklik, max_tokens,
+                   yanit_sentezi_modu, secili_arac_kodlari_json,
+                   hafiza_aktif_mi, hafiza_max_kayit, hafiza_saklama_gun, hafiza_arama_top_k, gozlemci_aktif_mi,
+                   aktif_mi, sistem_kaydi_mi, created_at, updated_at
+            FROM ai_agents
+            WHERE id = ?
+            """,
+            (aid,),
+        ).fetchone()
+    return _row_to_ai_agent(row, parent_map) if row else None
+
+
+def create_ai_agent(body: Dict[str, Any]) -> Dict[str, Any]:
+    uygulama_id = str(body.get("uygulamaId") or body.get("app_id") or "THINKPORT_CORE").strip().upper() or "THINKPORT_CORE"
+    ad = str(body.get("ad") or "").strip()
+    kod = str(body.get("kod") or "").strip()
+    if not ad or not kod:
+        return {"error": "Ajan adı ve benzersiz kodu zorunludur.", "mesaj": "Ajan adı ve benzersiz kodu zorunludur."}
+
+    aciklama = str(body.get("aciklama") or "").strip()
+    rol = str(body.get("rol") or "Genel AI Asistanı").strip()
+    ikon = str(body.get("ikon") or "Bot").strip()
+    renk = str(body.get("renk") or "#6366f1").strip()
+    kapsam = int(body.get("kapsam") or 1)
+    ust_ajan_id = int(body["ustAjanId"]) if body.get("ustAjanId") not in (None, "", 0, "0") else None
+
+    kurallar = _safe_parse_json_list(body.get("kurallar") if body.get("kurallar") is not None else body.get("kurallarJson"))
+    sistem_istemi = str(body.get("sistemIstemi") or "").strip()
+    hizli_istekler = _safe_parse_json_list(body.get("hizliIstekler") if body.get("hizliIstekler") is not None else body.get("hizliIsteklerJson"))
+    ai_saglayici_id = int(body["aiSaglayiciId"]) if body.get("aiSaglayiciId") not in (None, "", 0, "0") else 1
+    model_adi = str(body.get("modelAdi") or "gpt-4o").strip()
+    alt_modeller = _safe_parse_json_list(body.get("alternatifModeller") if body.get("alternatifModeller") is not None else body.get("alternatifModellerJson"))
+    sicaklik = float(body.get("sicaklik") if body.get("sicaklik") is not None else 0.7)
+    max_tokens = int(body.get("maxTokens") or 2048)
+    yanit_sentezi_modu = int(body.get("yanitSenteziModu") or 0)
+    secili_araclar = _safe_parse_json_list(body.get("seciliAracKodlari"))
+    hafiza_aktif_mi = 1 if body.get("hafizaAktifMi", True) else 0
+    hafiza_max_kayit = max(50, min(50000, int(body.get("hafizaMaxKayit") or 1000)))
+    hafiza_saklama_gun = max(1, min(3650, int(body.get("hafizaSaklamaGun") or 30)))
+    hafiza_arama_top_k = max(1, min(20, int(body.get("hafizaAramaTopK") or 5)))
+    gozlemci_aktif_mi = 1 if body.get("gozlemciAktifMi", True) else 0
+    aktif_mi = 1 if body.get("aktifMi", True) else 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with sqlite_db.connection() as conn:
+        dup = conn.execute(
+            "SELECT id FROM ai_agents WHERE LOWER(TRIM(kod)) = LOWER(TRIM(?)) LIMIT 1",
+            (kod,),
+        ).fetchone()
+        if dup:
+            return {"error": f"'{kod}' Ajan Id değeri başka bir ajan tarafından kullanılmaktadır. Ajan Id benzersiz olmalıdır.", "mesaj": f"'{kod}' Ajan Id değeri başka bir ajan tarafından kullanılmaktadır. Ajan Id benzersiz olmalıdır."}
+
+        max_row = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM ai_agents").fetchone()
+        next_id = int(max_row["m"] or 0) + 1
+
+        conn.execute(
+            """
+            INSERT INTO ai_agents (
+                id, uygulama_id, ad, kod, aciklama, rol, ikon, renk, kapsam, ust_ajan_id,
+                kurallar_json, sistem_istemi, hizli_istekler_json, ai_saglayici_id,
+                model_adi, alternatif_modeller_json, sicaklik, max_tokens,
+                yanit_sentezi_modu, secili_arac_kodlari_json,
+                hafiza_aktif_mi, hafiza_max_kayit, hafiza_saklama_gun, hafiza_arama_top_k, gozlemci_aktif_mi,
+                aktif_mi, sistem_kaydi_mi, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                next_id,
+                uygulama_id,
+                ad,
+                kod,
+                aciklama,
+                rol,
+                ikon,
+                renk,
+                kapsam,
+                ust_ajan_id,
+                json.dumps(kurallar, ensure_ascii=False),
+                sistem_istemi,
+                json.dumps(hizli_istekler, ensure_ascii=False),
+                ai_saglayici_id,
+                model_adi,
+                json.dumps(alt_modeller, ensure_ascii=False),
+                sicaklik,
+                max_tokens,
+                yanit_sentezi_modu,
+                json.dumps(secili_araclar, ensure_ascii=False),
+                hafiza_aktif_mi,
+                hafiza_max_kayit,
+                hafiza_saklama_gun,
+                hafiza_arama_top_k,
+                gozlemci_aktif_mi,
+                aktif_mi,
+                now_iso,
+                now_iso,
+            ),
+        )
+
+    created = get_ai_agent(next_id)
+    return created or {"error": "Ajan oluşturulamadı."}
+
+
+def update_ai_agent(agent_id: Any, body: Dict[str, Any]) -> Dict[str, Any]:
+    existing = get_ai_agent(agent_id)
+    if not existing:
+        return {"error": "Ajan bulunamadı.", "mesaj": "Ajan bulunamadı."}
+
+    aid = int(existing["id"])
+    uygulama_id = str(
+        body.get("uygulamaId") if body.get("uygulamaId") is not None else (existing.get("uygulamaId") or "THINKPORT_CORE")
+    ).strip().upper() or "THINKPORT_CORE"
+    ad = str(body.get("ad") if body.get("ad") is not None else existing["ad"]).strip()
+    kod = str(body.get("kod") if body.get("kod") is not None else existing["kod"]).strip()
+    if not ad or not kod:
+        return {"error": "Ajan adı ve benzersiz kodu zorunludur.", "mesaj": "Ajan adı ve benzersiz kodu zorunludur."}
+
+    aciklama = str(body.get("aciklama") if body.get("aciklama") is not None else existing["aciklama"]).strip()
+    rol = str(body.get("rol") if body.get("rol") is not None else existing["rol"]).strip()
+    ikon = str(body.get("ikon") if body.get("ikon") is not None else existing["ikon"]).strip()
+    renk = str(body.get("renk") if body.get("renk") is not None else existing["renk"]).strip()
+    kapsam = int(body.get("kapsam") if body.get("kapsam") is not None else existing["kapsam"])
+    ust_ajan_id = (
+        int(body["ustAjanId"])
+        if body.get("ustAjanId") not in (None, "", 0, "0")
+        else (existing["ustAjanId"] if "ustAjanId" not in body else None)
+    )
+
+    kurallar = (
+        _safe_parse_json_list(body.get("kurallar") if body.get("kurallar") is not None else body.get("kurallarJson"))
+        if ("kurallar" in body or "kurallarJson" in body)
+        else existing["kurallar"]
+    )
+    sistem_istemi = str(
+        body.get("sistemIstemi") if body.get("sistemIstemi") is not None else existing["sistemIstemi"]
+    ).strip()
+    hizli_istekler = (
+        _safe_parse_json_list(body.get("hizliIstekler") if body.get("hizliIstekler") is not None else body.get("hizliIsteklerJson"))
+        if ("hizliIstekler" in body or "hizliIsteklerJson" in body)
+        else existing["hizliIstekler"]
+    )
+    ai_saglayici_id = (
+        int(body["aiSaglayiciId"])
+        if body.get("aiSaglayiciId") not in (None, "", 0, "0")
+        else (existing["aiSaglayiciId"] or 1)
+    )
+    model_adi = str(body.get("modelAdi") if body.get("modelAdi") is not None else existing["modelAdi"]).strip() or "gpt-4o"
+    alt_modeller = (
+        _safe_parse_json_list(body.get("alternatifModeller") if body.get("alternatifModeller") is not None else body.get("alternatifModellerJson"))
+        if ("alternatifModeller" in body or "alternatifModellerJson" in body)
+        else existing["alternatifModeller"]
+    )
+    sicaklik = float(body.get("sicaklik") if body.get("sicaklik") is not None else existing["sicaklik"])
+    max_tokens = int(body.get("maxTokens") if body.get("maxTokens") is not None else existing["maxTokens"])
+    yanit_sentezi_modu = int(
+        body.get("yanitSenteziModu") if body.get("yanitSenteziModu") is not None else existing["yanitSenteziModu"]
+    )
+    secili_araclar = (
+        _safe_parse_json_list(body.get("seciliAracKodlari"))
+        if "seciliAracKodlari" in body
+        else existing["seciliAracKodlari"]
+    )
+    hafiza_aktif_mi = 1 if (body.get("hafizaAktifMi") if "hafizaAktifMi" in body else existing.get("hafizaAktifMi", True)) else 0
+    hafiza_max_kayit = max(
+        50,
+        min(50000, int(body.get("hafizaMaxKayit") if body.get("hafizaMaxKayit") is not None else (existing.get("hafizaMaxKayit") or 1000))),
+    )
+    hafiza_saklama_gun = max(
+        1,
+        min(3650, int(body.get("hafizaSaklamaGun") if body.get("hafizaSaklamaGun") is not None else (existing.get("hafizaSaklamaGun") or 30))),
+    )
+    hafiza_arama_top_k = max(
+        1,
+        min(20, int(body.get("hafizaAramaTopK") if body.get("hafizaAramaTopK") is not None else (existing.get("hafizaAramaTopK") or 5))),
+    )
+    gozlemci_aktif_mi = 1 if (body.get("gozlemciAktifMi") if "gozlemciAktifMi" in body else existing.get("gozlemciAktifMi", True)) else 0
+    aktif_mi = 1 if (body.get("aktifMi") if "aktifMi" in body else existing["aktifMi"]) else 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with sqlite_db.connection() as conn:
+        dup = conn.execute(
+            "SELECT id FROM ai_agents WHERE id != ? AND LOWER(TRIM(kod)) = LOWER(TRIM(?)) LIMIT 1",
+            (aid, kod),
+        ).fetchone()
+        if dup:
+            return {"error": f"'{kod}' Ajan Id değeri başka bir ajan tarafından kullanılmaktadır. Ajan Id benzersiz olmalıdır.", "mesaj": f"'{kod}' Ajan Id değeri başka bir ajan tarafından kullanılmaktadır. Ajan Id benzersiz olmalıdır."}
+
+        conn.execute(
+            """
+            UPDATE ai_agents
+            SET uygulama_id = ?, ad = ?, kod = ?, aciklama = ?, rol = ?, ikon = ?, renk = ?,
+                kapsam = ?, ust_ajan_id = ?, kurallar_json = ?, sistem_istemi = ?,
+                hizli_istekler_json = ?, ai_saglayici_id = ?, model_adi = ?,
+                alternatif_modeller_json = ?, sicaklik = ?, max_tokens = ?,
+                yanit_sentezi_modu = ?, secili_arac_kodlari_json = ?,
+                hafiza_aktif_mi = ?, hafiza_max_kayit = ?, hafiza_saklama_gun = ?,
+                hafiza_arama_top_k = ?, gozlemci_aktif_mi = ?,
+                aktif_mi = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                uygulama_id,
+                ad,
+                kod,
+                aciklama,
+                rol,
+                ikon,
+                renk,
+                kapsam,
+                ust_ajan_id,
+                json.dumps(kurallar, ensure_ascii=False),
+                sistem_istemi,
+                json.dumps(hizli_istekler, ensure_ascii=False),
+                ai_saglayici_id,
+                model_adi,
+                json.dumps(alt_modeller, ensure_ascii=False),
+                sicaklik,
+                max_tokens,
+                yanit_sentezi_modu,
+                json.dumps(secili_araclar, ensure_ascii=False),
+                hafiza_aktif_mi,
+                hafiza_max_kayit,
+                hafiza_saklama_gun,
+                hafiza_arama_top_k,
+                gozlemci_aktif_mi,
+                aktif_mi,
+                now_iso,
+                aid,
+            ),
+        )
+
+    updated = get_ai_agent(aid)
+    return updated or {"error": "Ajan güncellenemedi."}
+
+
+def delete_ai_agent(agent_id: Any) -> Dict[str, Any]:
+    existing = get_ai_agent(agent_id)
+    if not existing:
+        return {"error": "Ajan bulunamadı.", "mesaj": "Ajan bulunamadı."}
+    if existing.get("sistemKaydiMi"):
+        return {
+            "error": "Sistem tarafından tanımlanan temel ajanlar silinemez.",
+            "mesaj": "Sistem tarafından tanımlanan temel ajanlar silinemez.",
+        }
+    aid = int(existing["id"])
+    with sqlite_db.connection() as conn:
+        conn.execute("DELETE FROM ai_agents WHERE id = ?", (aid,))
+    return {"status": "deleted", "id": aid}
+
+
+def set_ai_agent_tools(agent_id: Any, tools_body: Any) -> Dict[str, Any]:
+    existing = get_ai_agent(agent_id)
+    if not existing:
+        return {"error": "Ajan bulunamadı.", "mesaj": "Ajan bulunamadı."}
+    aid = int(existing["id"])
+    codes: List[str] = []
+    if isinstance(tools_body, list):
+        codes = [str(c).strip() for c in tools_body if str(c).strip()]
+    elif isinstance(tools_body, dict) and isinstance(tools_body.get("seciliAracKodlari"), list):
+        codes = [str(c).strip() for c in tools_body["seciliAracKodlari"] if str(c).strip()]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with sqlite_db.connection() as conn:
+        conn.execute(
+            "UPDATE ai_agents SET secili_arac_kodlari_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(codes, ensure_ascii=False), now_iso, aid),
+        )
+    return {"status": "ok", "id": aid, "seciliAracKodlari": codes}
+
+
+def list_ai_providers() -> List[Dict[str, Any]]:
+    models_payload = get_openai_models_list_bridge({"type": "chat", "exclude_image": "true"})
+    model_items = models_payload.get("data") or []
+    all_chat_models = [str(m["id"]) for m in model_items if m.get("id")]
+    local_models = [str(m["id"]) for m in model_items if m.get("is_local") and m.get("id")]
+    web_models = [str(m["id"]) for m in model_items if not m.get("is_local") and m.get("id")]
+
+    if not all_chat_models:
+        all_chat_models = ["gpt-4o", "claude-3-5-sonnet", "deepseek-r1", "gemini-2.5-pro"]
+    if not web_models:
+        web_models = ["gpt-4o", "claude-3-5-sonnet", "deepseek-r1", "gemini-2.5-pro"]
+
+    return [
+        {
+            "id": 1,
+            "ad": "ThinkPort Birleşik Gateway (Tüm Modeller)",
+            "saglayiciTuru": 1,
+            "baseUrl": "http://localhost:8000/v1",
+            "varsayilanModel": all_chat_models[0],
+            "desteklenenModeller": all_chat_models,
+            "aktifMi": True,
+            "apiKeyTanimliMi": True,
+        },
+        {
+            "id": 2,
+            "ad": "Ollama Yerel Motor (Local LLM)",
+            "saglayiciTuru": 4,
+            "baseUrl": "http://localhost:11434",
+            "varsayilanModel": local_models[0] if local_models else all_chat_models[0],
+            "desteklenenModeller": local_models if local_models else all_chat_models,
+            "aktifMi": True,
+            "apiKeyTanimliMi": True,
+        },
+        {
+            "id": 3,
+            "ad": "Web AI Köprüsü (OpenAI / Claude / DeepSeek / Gemini)",
+            "saglayiciTuru": 1,
+            "baseUrl": "http://localhost:8000/v1",
+            "varsayilanModel": web_models[0],
+            "desteklenenModeller": web_models,
+            "aktifMi": True,
+            "apiKeyTanimliMi": True,
+        },
+    ]
+
+
+def fetch_ai_provider_models(provider_id: Any) -> List[str]:
+    providers = list_ai_providers()
+    try:
+        pid = int(str(provider_id).strip())
+    except Exception:
+        pid = 1
+    for p in providers:
+        if int(p["id"]) == pid:
+            return list(p.get("desteklenenModeller") or [])
+    return list(providers[0].get("desteklenenModeller") or []) if providers else ["gpt-4o"]
+
+
+def list_ai_tools_catalog() -> List[Dict[str, Any]]:
+    return [
+        {
+            "aracKodu": "thinkport_memory_search",
+            "aracAdi": "ThinkPort pgvector Ajan Hafızası Tarama",
+            "kategoriAdi": "Ajan Hafızası (pgvector)",
+            "ikon": "Database",
+            "kapsam": 1,
+            "aciklama": "Ajanın (app_id + agent_id) birleşik kimliğine ait geçmiş konuşmaları, öğrenilen kuralları ve uzun süreli hafızayı pgvector kosinüs benzerliği ve pg_trgm ile tarar.",
+        },
+        {
+            "aracKodu": "thinkport_memory_save",
+            "aracAdi": "ThinkPort pgvector Kalıcı Hafıza Kaydetme",
+            "kategoriAdi": "Ajan Hafızası (pgvector)",
+            "ikon": "Database",
+            "kapsam": 1,
+            "aciklama": "Önemli bir kararı, kullanıcı tercihini veya kuralı ajanın (app_id + agent_id) özel pgvector hafızasına kaydeder.",
+        },
+        {
+            "aracKodu": "thinkport_conversation_recall",
+            "aracAdi": "ThinkPort Geçmiş Sohbet Bağlamı Getirici",
+            "kategoriAdi": "Ajan Hafızası (pgvector)",
+            "ikon": "Layers",
+            "kapsam": 1,
+            "aciklama": "Aynı (app_id + agent_id) kimliğine ait önceki sohbet oturumlarının detaylı mesaj geçmişini getirir.",
+        },
+        {
+            "aracKodu": "observer_detect_truncation",
+            "aracAdi": "Kesik Yanıt & Token Sınırı Denetçisi",
+            "kategoriAdi": "Sistem & Gözlemci",
+            "ikon": "Layers",
+            "kapsam": 2,
+            "aciklama": "LLM yanıtlarında finish_reason=length, tembel üç nokta (...) kısaltması, açık kalan kod/JSON blokları ve erken akış kesilmelerini tespit eder.",
+        },
+        {
+            "aracKodu": "observer_continue_generation",
+            "aracAdi": "Otomatik Tamamlama İstemi & Yanıt Birleştirici",
+            "kategoriAdi": "Sistem & Gözlemci",
+            "ikon": "Layers",
+            "kapsam": 2,
+            "aciklama": "Yarıda kesilen yanıtlar için son bağlamdan devam istemi (continuation prompt) üretir ve gelen parçaları tek yanıt olarak birleştirir.",
+        },
+        {
+            "aracKodu": "rag_search_documents",
+            "aracAdi": "pgvector RAG Doküman & Hafıza Sorgulama",
+            "kategoriAdi": "Veri & Analiz",
+            "ikon": "Database",
+            "kapsam": 1,
+            "aciklama": "Sohbete eklenen belgeleri ve oturum hafızasını pgvector kosinüs benzerliği ile sorgular.",
+        },
+        {
+            "aracKodu": "erp_query_data",
+            "aracAdi": "ERP Veri & Stok/Cari Sorgulama",
+            "kategoriAdi": "Veri & Analiz",
+            "ikon": "Database",
+            "kapsam": 1,
+            "aciklama": "Webakus ERP üzerindeki cari hesap, stok, ürün, fiyat ve ticari belge kayıtlarını sorgular.",
+        },
+        {
+            "aracKodu": "erp_navigate",
+            "aracAdi": "ERP Ekran & Rota Yönlendirici",
+            "kategoriAdi": "Navigasyon",
+            "ikon": "Compass",
+            "kapsam": 1,
+            "aciklama": "Kullanıcıyı ilgili belge, kart veya liste ekranına yönlendirir.",
+        },
+        {
+            "aracKodu": "erp_create_document",
+            "aracAdi": "ERP Belge & Kampanya Taslağı Oluşturucu",
+            "kategoriAdi": "Belge & İşlem",
+            "ikon": "FilePlus",
+            "kapsam": 1,
+            "aciklama": "Analiz edilen kalemlerle satış, teklif, sipariş veya kampanya belgesi taslağı oluşturur.",
+        },
+        {
+            "aracKodu": "erp_request_confirmation",
+            "aracAdi": "Kullanıcı Teyit & Onay Kartı",
+            "kategoriAdi": "Etkileşim & Onay",
+            "ikon": "CheckCircle2",
+            "kapsam": 1,
+            "aciklama": "Kritik işlem veya adres/fiyat seçimi öncesinde kullanıcıya Evet/Hayır onay kartı sunar.",
+        },
+        {
+            "aracKodu": "erp_get_page_context",
+            "aracAdi": "Aktif Ekran & Form Bağlamı Okuyucu",
+            "kategoriAdi": "Sistem & Gözlemci",
+            "ikon": "Layers",
+            "kapsam": 1,
+            "aciklama": "Kullanıcının o anda açık olan ekranındaki form alanlarını ve seçili kayıt bağlamını okur.",
+        },
+        {
+            "aracKodu": "erp_list_cloud_files",
+            "aracAdi": "Bulut Dosyaları (FilesOnClouds) Listeleme",
+            "kategoriAdi": "Belge & İşlem",
+            "ikon": "FilePlus",
+            "kapsam": 1,
+            "aciklama": "Kullanıcının bulut depolama alanındaki PDF, Excel ve görsel belgelerini listeler.",
+        },
+    ]
+
+
+def list_ai_tools_templates() -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": "TMPL_MEMORY_PROTOCOL",
+            "baslik": "ThinkPort pgvector Hafıza Tarama & Kayıt Protokolü",
+            "aciklama": "(app_id + agent_id) birleşik kimliğiyle geçmiş hafızayı tool_call üzerinden tarama kuralı",
+            "icerik": "Kullanıcı geçmiş bir sohbetten, önceki bir karardan veya daha önce belirttiği bir tercihten bahsettiğinde yanıt üretmeden önce `thinkport_memory_search` aracını çağırarak kendi (app_id + agent_id) hafızanı tara. İleride hatırlanması gereken kritik bilgileri `thinkport_memory_save` aracıyla hafızaya kaydet.",
+        },
+        {
+            "id": "TMPL_OBSERVER",
+            "baslik": "Gözlemci Ajan Kesinti & Devam Politikası",
+            "aciklama": "Token yetmezliği ve yarım kalan yanıtları otomatik tamamlama kural şablonu",
+            "icerik": "Yanıt token sınırı (finish_reason=length) veya erken akış kesilmesi nedeniyle yarıda kaldığında, önceki metni tekrarlamadan kaldığı karakterden devam ettir ve tek yanıt olarak birleştir.",
+        },
+        {
+            "id": "TMPL_RAG_STRICT",
+            "baslik": "Sıkı Belge & RAG Doğrulama İlkesi",
+            "aciklama": "Halüsinasyon önleme ve kaynak belgeye sadakat kuralı",
+            "icerik": "Ekli belgelerde veya veritabanı sorgularında yer almayan hiçbir veriyi tahmini olarak üretme; eksik bilgi varsa kullanıcıdan teyit iste.",
+        },
+    ]
+
+
 def main() -> None:
     raw_in = sys.stdin.read()
     req = json.loads(raw_in or "{}")
@@ -2593,6 +3491,38 @@ def main() -> None:
         print(json.dumps(get_sqlite_state_overlay(), ensure_ascii=False))
     elif action == "openai_models_list":
         print(json.dumps(get_openai_models_list_bridge(req.get("params") or {}), ensure_ascii=False))
+    elif action == "protocols_list":
+        print(json.dumps(list_api_protocols(), ensure_ascii=False))
+    elif action == "protocols_get":
+        print(json.dumps(get_api_protocol(str(req.get("protocol_id") or "")), ensure_ascii=False))
+    elif action == "protocols_create":
+        print(json.dumps(create_api_protocol(req.get("body") or {}), ensure_ascii=False))
+    elif action == "protocols_update":
+        print(json.dumps(update_api_protocol(str(req.get("protocol_id") or ""), req.get("body") or {}), ensure_ascii=False))
+    elif action == "protocols_delete":
+        print(json.dumps(delete_api_protocol(str(req.get("protocol_id") or "")), ensure_ascii=False))
+    elif action == "protocols_test":
+        print(json.dumps(test_api_protocol(req.get("body") or {}), ensure_ascii=False))
+    elif action == "ai_agents_list":
+        print(json.dumps(list_ai_agents(), ensure_ascii=False))
+    elif action == "ai_agents_get":
+        print(json.dumps(get_ai_agent(req.get("agent_id")), ensure_ascii=False))
+    elif action == "ai_agents_create":
+        print(json.dumps(create_ai_agent(req.get("body") or {}), ensure_ascii=False))
+    elif action == "ai_agents_update":
+        print(json.dumps(update_ai_agent(req.get("agent_id"), req.get("body") or {}), ensure_ascii=False))
+    elif action == "ai_agents_delete":
+        print(json.dumps(delete_ai_agent(req.get("agent_id")), ensure_ascii=False))
+    elif action == "ai_agents_set_tools":
+        print(json.dumps(set_ai_agent_tools(req.get("agent_id"), req.get("body")), ensure_ascii=False))
+    elif action == "ai_providers_list":
+        print(json.dumps(list_ai_providers(), ensure_ascii=False))
+    elif action == "ai_providers_fetch_models":
+        print(json.dumps(fetch_ai_provider_models(req.get("provider_id")), ensure_ascii=False))
+    elif action == "ai_tools_catalog":
+        print(json.dumps(list_ai_tools_catalog(), ensure_ascii=False))
+    elif action == "ai_tools_templates":
+        print(json.dumps(list_ai_tools_templates(), ensure_ascii=False))
     else:
         print(json.dumps({"error": "unknown_action"}))
 

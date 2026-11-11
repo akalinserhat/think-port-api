@@ -16,7 +16,7 @@ from app.dtos.conversation_dto import (
     MessageAttachmentDTO,
     UpdateConversationRequestDTO,
 )
-from app.repositories.sqlite_db import sqlite_db
+from app.repositories.postgres_db import sqlite_db
 
 
 class ConversationEventBroadcaster:

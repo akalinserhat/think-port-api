@@ -1,7 +1,7 @@
 from typing import List, Optional
 from app.dtos.user_dto import UserResponseDTO
 from app.repositories.state_store import InMemoryStateStore
-from app.repositories.sqlite_db import sqlite_db
+from app.repositories.postgres_db import sqlite_db
 
 
 class UserRepository:

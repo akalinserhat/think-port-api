@@ -2,7 +2,7 @@ import hashlib
 import os
 import secrets
 import ssl
-from typing import Optional
+from typing import Optional, Tuple
 
 
 def generate_raw_api_token() -> str:
@@ -34,12 +34,59 @@ def extract_bearer_token(authorization_header: Optional[str]) -> Optional[str]:
     if not authorization_header:
         return None
     raw = authorization_header.strip()
-    if not raw:
+    if not raw or raw.lower() == "bearer":
         return None
     if raw.lower().startswith("bearer "):
         token = raw[7:].strip()
         return token if token else None
     return raw
+
+
+def parse_composite_bearer_token(
+    raw_token: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Authorization başlığı veya ham composite token dizesini (api_key, app_id, agent_id) üçlüsüne ayrıştırır.
+
+    Desteklenen formatlar:
+    1. <API_KEY>:<APP_ID>:<AGENT_ID> -> (api_key, app_id, agent_id)
+    2. <API_KEY>:<AGENT_ID>           -> (api_key, None, agent_id)
+    3. <API_KEY>                      -> (api_key, None, None)
+
+    Kurallar:
+    - 'Bearer ' öneki (büyük/küçük harf duyarsız) varsa temizlenir.
+    - Tüm parçaların başındaki ve sonundaki boşluklar (whitespace) kırpılır.
+    - agent_id parçası iki nokta üst üste (:) içeriyorsa (örn. URN formatı), korunur.
+    - api_key eksik veya boşsa ("", None, None) döner.
+    """
+    if not raw_token:
+        return ("", None, None)
+
+    token = extract_bearer_token(raw_token)
+    if not token:
+        return ("", None, None)
+
+    clean = token.strip()
+    if not clean:
+        return ("", None, None)
+
+    if ":" not in clean:
+        return (clean, None, None)
+
+    parts = clean.split(":")
+    if len(parts) >= 3:
+        api_key = parts[0].strip()
+        app_id = parts[1].strip() or None
+        agent_id = ":".join(parts[2:]).strip() or None
+        return (api_key, app_id, agent_id)
+    elif len(parts) == 2:
+        api_key = parts[0].strip()
+        agent_id = parts[1].strip() or None
+        return (api_key, None, agent_id)
+
+    return (clean, None, None)
+
+
+parse_composite_token = parse_composite_bearer_token
 
 
 def create_verified_ssl_context() -> ssl.SSLContext:

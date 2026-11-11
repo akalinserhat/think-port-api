@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 from app.core.dependencies import get_user_service
 from app.dtos.user_dto import CreateUserRequestDTO, UserResponseDTO
-from app.repositories.sqlite_cli_bridge import (
+from app.repositories.postgres_cli_bridge import (
     authenticate_system_user,
     create_system_user,
     delete_system_user,

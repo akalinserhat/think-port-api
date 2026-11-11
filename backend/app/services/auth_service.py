@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timezone
 from typing import Optional
-from app.core.security import extract_bearer_token, hash_api_key
+from app.core.security import extract_bearer_token, hash_api_key, parse_composite_bearer_token
 from app.core.exceptions import (
     invalid_auth_header_error,
     invalid_api_key_error,
@@ -38,42 +38,54 @@ class AuthService:
         self,
         authorization: Optional[str],
         x_user_id: Optional[str] = None,
+        header_app_id: Optional[str] = None,
+        header_agent_id: Optional[str] = None,
+        x_app_id: Optional[str] = None,
+        x_agent_id: Optional[str] = None,
     ) -> AuthenticatedUserContextDTO:
-        """Gelen isteğin kimlik, süre, aktiflik, kota ve RPM kontrollerini sırasıyla yürütür."""
-        raw_key = extract_bearer_token(authorization)
-        key_record: Optional[ApiKeyRecordDTO] = None
+        """Gelen isteğin kimlik, süre, aktiflik, kota ve RPM kontrollerini sırasıyla yürütür.
 
-        if raw_key:
-            key_hash = hash_api_key(raw_key)
-            candidate_key = self._api_key_repo.get_by_hash(key_hash)
-            if candidate_key:
-                if not candidate_key.is_active:
-                    raise invalid_api_key_error()
-                self._require_unexpired_key(candidate_key)
-                key_record = candidate_key
+        - Composite Bearer token (<API_KEY>:<APP_ID>:<AGENT_ID> veya <API_KEY>:<AGENT_ID>) ayrıştırılır.
+        - Yalnızca ham api_key kısmı SHA-256 ile özetlenir (hash).
+        - api_key eksikse veya veritabanında bulunamazsa / pasifse derhal HTTP 401 Unauthorized fırlatılır.
+        - app_id hiyerarşisi: token_app_id -> header_app_id -> candidate_key.id (varsayılan).
+        - agent_id hiyerarşisi: token_agent_id -> header_agent_id -> "".
+        - Yetkisiz oturum (studio_session / sys_usr_01) varsayılanı tamamen kaldırılmıştır.
+        """
+        raw_token = extract_bearer_token(authorization)
+        if not raw_token:
+            raise invalid_auth_header_error()
 
-        if key_record is not None:
-            user = self._require_active_user(key_record.user_id)
-            self._require_sufficient_token_quota(user)
-            self._enforce_minute_rate_limit(user)
-            return self._build_user_context(user, key_record)
+        api_key, token_app_id, token_agent_id = parse_composite_bearer_token(raw_token)
+        if not api_key:
+            raise invalid_auth_header_error()
 
-        # AI Sohbet Stüdyosu (Web UI) veya yerel ERP istemci (Webakus.AdminUI vb.) varsayılan oturumu
-        target_uid = (x_user_id or "").strip() or "sys_usr_01"
-        user_candidate = self._user_repo.get_by_id(target_uid)
-        if not user_candidate:
-            target_uid = "sys_usr_01"
-        user = self._require_active_user(target_uid)
+        key_hash = hash_api_key(api_key)
+        candidate_key = self._api_key_repo.get_by_hash(key_hash)
+        if not candidate_key:
+            raise invalid_api_key_error()
+
+        if not candidate_key.is_active:
+            raise invalid_api_key_error()
+
+        self._require_unexpired_key(candidate_key)
+
+        user = self._require_active_user(candidate_key.user_id)
         self._require_sufficient_token_quota(user)
         self._enforce_minute_rate_limit(user)
-        return AuthenticatedUserContextDTO(
-            user_id=user.id,
-            email=user.email,
-            api_key_id="studio_session",
-            token_quota=user.token_quota,
-            tokens_used=user.tokens_used,
-            rpm_limit=user.rpm_limit,
-            concurrent_limit=user.concurrent_limit,
+
+        effective_header_app = (header_app_id or x_app_id or "").strip() or None
+        effective_header_agent = (header_agent_id or x_agent_id or "").strip() or None
+
+        effective_app_id = token_app_id or effective_header_app or candidate_key.id
+        effective_agent_id = token_agent_id or effective_header_agent or ""
+
+        return self._build_user_context(
+            user=user,
+            key_record=candidate_key,
+            app_id=effective_app_id,
+            agent_id=effective_agent_id,
+            raw_api_key=api_key,
         )
 
     def acquire_concurrency_slot(self, user_ctx: AuthenticatedUserContextDTO) -> None:
@@ -97,7 +109,9 @@ class AuthService:
 
     def _require_active_api_key(self, raw_key: str) -> ApiKeyRecordDTO:
         """API anahtarının varlığını ve aktifliğini doğrular."""
-        key_hash = hash_api_key(raw_key)
+        api_key, _, _ = parse_composite_bearer_token(raw_key)
+        target_key = api_key or raw_key
+        key_hash = hash_api_key(target_key)
         key_record = self._api_key_repo.get_by_hash(key_hash)
         if not key_record or not key_record.is_active:
             raise invalid_api_key_error()
@@ -138,6 +152,9 @@ class AuthService:
     def _build_user_context(
         user: UserResponseDTO,
         key_record: ApiKeyRecordDTO,
+        app_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        raw_api_key: Optional[str] = None,
     ) -> AuthenticatedUserContextDTO:
         """Doğrulanmış kullanıcı ve anahtar bilgilerinden bağlam DTO'su üretir."""
         return AuthenticatedUserContextDTO(
@@ -148,4 +165,7 @@ class AuthService:
             tokens_used=user.tokens_used,
             rpm_limit=user.rpm_limit,
             concurrent_limit=user.concurrent_limit,
+            app_id=app_id,
+            agent_id=agent_id,
+            raw_api_key=raw_api_key,
         )

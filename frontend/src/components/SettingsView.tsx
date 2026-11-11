@@ -14,6 +14,7 @@ import {
   Zap,
   Users,
   ShieldCheck,
+  Bot,
 } from 'lucide-react';
 import {
   ActionMenu,
@@ -27,9 +28,12 @@ import {
   useBaseSystemPage,
 } from '@akalin/ui';
 import { useSystemSettingModules } from '@akalin/module_core';
-import { GatewaySettingsDTO, SystemUserRecordDTO, UserRecordDTO } from '../dtos';
+import { AIModelDTO, GatewaySettingsDTO, SystemUserRecordDTO, UserRecordDTO } from '../dtos';
+import { ModelRegistry } from '../models';
+import { protocolService } from '../services';
 import { SystemUsersView } from './SystemUsersView';
 import { RolesPermissionsView } from './RolesPermissionsView';
+import { AiSettingsGroupView } from './AiSettingsGroupView';
 import { initializeGatewayModules } from '../modules';
 
 initializeGatewayModules();
@@ -41,9 +45,11 @@ interface GatewaySettingsModuleProps {
 
 interface SettingsViewProps {
   settings: GatewaySettingsDTO;
+  models?: AIModelDTO[];
   users?: UserRecordDTO[];
   systemUsers?: SystemUserRecordDTO[];
   currentAuthUser?: SystemUserRecordDTO | null;
+  onSelectModel?: (modelId: string) => void;
   onSaveSettings: (updated: GatewaySettingsDTO) => Promise<void>;
   onRefreshState: () => Promise<void>;
   onRefreshSystemUsers?: () => Promise<void>;
@@ -300,8 +306,10 @@ const GatewaySettingsModule: React.FC<GatewaySettingsModuleProps> = ({
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   settings,
+  models = [],
   systemUsers = [],
   currentAuthUser = null,
+  onSelectModel,
   onSaveSettings,
   onRefreshState,
   onRefreshSystemUsers = async () => {},
@@ -312,9 +320,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const navigate = useNavigate();
 
   const registeredSettingModules = useSystemSettingModules();
+  const [protocolsCount, setProtocolsCount] = useState<number>(4);
+  const [agentsCount, setAgentsCount] = useState<number>(3);
+  const [modelsCount, setModelsCount] = useState<number>(() =>
+    ModelRegistry.getMergedModels(models).length
+  );
+
+  useEffect(() => {
+    setModelsCount(ModelRegistry.getMergedModels(models).length);
+  }, [models]);
+
+  useEffect(() => {
+    protocolService
+      .listProtocols()
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setProtocolsCount(list.length);
+        }
+      })
+      .catch(() => {
+        // Fallback to default seeded count
+      });
+    fetch('/api/AiAjanlar')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setAgentsCount(list.length);
+        }
+      })
+      .catch(() => {
+        // Fallback to default seeded count
+      });
+  }, []);
 
   const selectedModuleId = useMemo(() => {
     const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '');
+    if (
+      clean.startsWith('/settings/ai') ||
+      clean.startsWith('/settings/models') ||
+      clean.startsWith('/settings/agents') ||
+      clean.startsWith('/settings/protocols')
+    ) {
+      return 'ai';
+    }
     const match = clean.match(/^\/settings\/([^/?#]+)/);
     return match ? decodeURIComponent(match[1]) : null;
   }, [location.pathname]);
@@ -337,6 +385,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <GatewaySettingsModule
             settings={settings}
             onSaveSettings={onSaveSettings}
+          />
+        ),
+      },
+      {
+        id: 'ai',
+        name: t('settings.aiGroupTitle', 'Yapay Zeka'),
+        desc: t(
+          'settings.aiGroupDesc',
+          'Gateway yapay zeka modellerini, uzman/gözlemci AI ajanlarını ve dinamik REST API protokol dönüştürücülerini yapılandırın'
+        ),
+        icon: <Bot size={22} />,
+        badge: t('settings.aiGroupBadge', {
+          modelCount: modelsCount,
+          agentCount: agentsCount,
+          protocolCount: protocolsCount,
+          defaultValue: `${modelsCount} Model · ${agentsCount} Ajan · ${protocolsCount} Protokol`,
+        }),
+        keywords:
+          'yapay zeka ai modeller ajanlar gözlemci ajan observer llm gpt-4o claude deepseek gemini flux sdxl ollama qwen gemma api protokolleri openai anthropic rest javascript script',
+        hasOwnLayout: true,
+        component: (
+          <AiSettingsGroupView
+            models={models}
+            onSelectModelForChat={onSelectModel}
+            onShowToast={onShowToast}
+            onProtocolsCountChange={setProtocolsCount}
+            onModelsCountChange={setModelsCount}
+            onAgentsCountChange={setAgentsCount}
           />
         ),
       },
@@ -390,7 +466,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   }, [
     t,
     settings,
+    models,
+    modelsCount,
+    agentsCount,
+    onSelectModel,
     onSaveSettings,
+    protocolsCount,
     systemUsers,
     currentAuthUser,
     onRefreshSystemUsers,

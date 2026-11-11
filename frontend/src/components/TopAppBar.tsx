@@ -50,6 +50,8 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
 
   const breadcrumbItems = useMemo<BreadcrumbItem[]>(() => {
     const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '');
+    const chatMatch = clean.match(/^\/chat\/([^/?#]+)/);
+    const chatSubId = chatMatch ? decodeURIComponent(chatMatch[1]) : null;
     const settingsMatch = clean.match(/^\/settings\/([^/?#]+)/);
     const settingsModuleId = settingsMatch ? decodeURIComponent(settingsMatch[1]) : null;
     const usersMatch = clean.match(/^\/users\/([^/?#]+)/);
@@ -63,6 +65,35 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
         onClick: () => onSelectTab?.('overview'),
       },
     ];
+
+    if (
+      activeTab === 'chat' &&
+      (chatSubId ||
+        headerBreadcrumbOptions?.recordTitle ||
+        (headerBreadcrumbOptions?.subTrail && headerBreadcrumbOptions.subTrail.length > 0))
+    ) {
+      baseItems.push({
+        label: tabTitles.chat,
+        onClick: () => navigate('/chat'),
+      });
+      if (headerBreadcrumbOptions?.subTrail && headerBreadcrumbOptions.subTrail.length > 0) {
+        headerBreadcrumbOptions.subTrail.forEach((sub, idx, arr) => {
+          baseItems.push({
+            label: sub.label,
+            onClick: sub.onClick,
+            active: sub.active ?? idx === arr.length - 1,
+          });
+        });
+      } else {
+        baseItems.push({
+          label:
+            headerBreadcrumbOptions?.recordTitle ||
+            (chatSubId === 'new' || chatSubId === 'yeni' ? 'Yeni Sohbet' : 'Sohbet Oturumu'),
+          active: true,
+        });
+      }
+      return baseItems;
+    }
 
     if (activeTab === 'users' && usersSubId) {
       baseItems.push({
@@ -95,6 +126,43 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
     }
 
     if (activeTab === 'settings' && settingsModuleId) {
+      const aiNestedMatch = clean.match(/^\/settings\/ai\/([^/?#]+)/);
+      const aiSubId = aiNestedMatch
+        ? decodeURIComponent(aiNestedMatch[1])
+        : settingsModuleId === 'models' || settingsModuleId === 'protocols'
+          ? settingsModuleId
+          : null;
+
+      if (settingsModuleId === 'ai' || aiSubId) {
+        baseItems.push({
+          label: tabTitles.settings,
+          onClick: () => navigate('/settings'),
+        });
+
+        if (aiSubId) {
+          baseItems.push({
+            label: t('settings.aiGroupTitle', 'Yapay Zeka'),
+            onClick: () => navigate('/settings/ai'),
+          });
+          baseItems.push({
+            label:
+              aiSubId === 'models'
+                ? t('settings.modelsModuleTitle', 'Modeller')
+                : aiSubId === 'protocols'
+                  ? t('settings.protocolsModuleTitle', 'API Protokolleri')
+                  : aiSubId,
+            active: true,
+          });
+        } else {
+          baseItems.push({
+            label: t('settings.aiGroupTitle', 'Yapay Zeka'),
+            active: true,
+          });
+        }
+
+        return baseItems;
+      }
+
       const moduleLabel =
         settingsModuleId === 'gateway'
           ? t('settings.gatewayModuleTitle', 'Gateway Sistem Ayarları')

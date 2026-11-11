@@ -20,14 +20,12 @@ import {
   ShieldCheck,
   MessageSquare,
   Eye,
-  Code2,
   Zap,
-  FileText,
-  Layers,
 } from 'lucide-react';
 import {
   BaseListPage,
   BasePopup,
+  BaseSwitch,
   type DataTableColumn,
   type ActionMenuItem,
 } from '@akalin/ui';
@@ -51,6 +49,10 @@ import {
   UserRecordDTO,
 } from '../dtos';
 import { chatService, conversationService, fileParserService } from '../services';
+import {
+  getChatStudioDefaultValues,
+  buildChatStudioPageDropdownActions,
+} from './ChatStudioViewDefaultValue';
 
 interface ChatStudioViewProps {
   models: AIModelDTO[];
@@ -68,44 +70,7 @@ interface ChatStudioViewProps {
   onShowToast: (msg: string) => void;
 }
 
-const STUDIO_PROMPT_SUGGESTIONS: PromptSuggestion[] = [
-  {
-    id: 'prompt-arch',
-    title: 'Mikroservis Mimari Tasarımı',
-    category: 'Mimari',
-    description: 'Yüksek trafikli bir API Gateway ve önbellekleme mimarisi tasarla.',
-    prompt:
-      'Yüksek trafikli bir OpenAI uyumlu API Gateway için hız sınırlandırma (rate limiting), oturum havuzu ve önbellekleme stratejilerini içeren bir mimari öner.',
-    icon: <Layers size={18} />,
-  },
-  {
-    id: 'prompt-sql',
-    title: 'SQL Performans Analizi',
-    category: 'Veritabanı',
-    description: 'Veritabanı indeksleme ve sorgu optimizasyonu önerileri al.',
-    prompt:
-      'Milyonlarca mesaj kaydı barındıran bir sohbet veritabanında (conversations, messages, attachments) en verimli indeksleme ve sayfalama stratejisi nasıl olmalıdır?',
-    icon: <Code2 size={18} />,
-  },
-  {
-    id: 'prompt-doc',
-    title: 'Doküman & Kod Özeti',
-    category: 'Analiz',
-    description: 'Eklenen dosyaları veya teknik metinleri maddeler halinde özetle.',
-    prompt:
-      'Paylaştığım teknik içeriği inceleyip temel bulguları, olası riskleri ve aksiyon maddelerini yapılandırılmış şekilde özetler misin?',
-    icon: <FileText size={18} />,
-  },
-  {
-    id: 'prompt-debug',
-    title: 'Hata Ayıklama Asistanı',
-    category: 'Tanılama',
-    description: 'Asenkron akış (SSE) ve bağlantı kopması sorunlarını teşhis et.',
-    prompt:
-      'SSE (Server-Sent Events) tabanlı bir LLM akışında istemci bağlantısı koptuğunda arka uçta kaynak sızıntısını önlemek için hangi önlemler alınmalıdır?',
-    icon: <Zap size={18} />,
-  },
-];
+const STUDIO_PROMPT_SUGGESTIONS: PromptSuggestion[] = [];
 
 function extractThinkBlocksFromText(rawText: string): {
   thinkingText: string;
@@ -163,11 +128,12 @@ function getUtf8ByteLength(str: string): number {
 function stripUiTraceBlocksFromText(text: string): string {
   if (!text) return '';
   let cleaned = text;
+  cleaned = cleaned.replace(/:::details\s+\[[^\n]+\]\n[\s\S]*?:::\s*/g, '');
   if (cleaned.includes('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')) {
     cleaned = cleaned.split('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')[0].trimEnd();
   }
   cleaned = cleaned.replace(
-    /^> 🧠 \*\*LLM Düşünce[^\n]*\n(?:```text\n[\s\S]*?\n```|> [^\n]*)\n\n/,
+    /^> 🧠 \*?\*?LLM Düşünce[^\n]*\n(?:```text\n[\s\S]*?\n```|> [^\n]*)(?:\n\n---\n\n|\n\n)?/,
     ''
   );
   if (cleaned.includes('\n\n---\n📥 **Gelen LLM İletişim Raporu:**')) {
@@ -191,7 +157,7 @@ function stripUiTraceBlocksFromText(text: string): string {
   if (cleaned.includes('\n\n📄 **LLM\'e Aktarılan Ekli Belge İçeriği')) {
     cleaned = cleaned.split('\n\n📄 **LLM\'e Aktarılan Ekli Belge İçeriği')[0].trimEnd();
   }
-  return cleaned;
+  return cleaned.trim();
 }
 
 function describeJsonShape(parsed: any): string {
@@ -310,13 +276,13 @@ function formatUnfencedJsonInSegment(segment: string): {
       if (cleanBefore) {
         result += `${cleanBefore}\n\n`;
       }
-      result += `📦 **Gönderilen JSON Verisi (${labelTitle} — ${shapeDesc} · ${byteLen} bayt):**\n\`\`\`json\n${prettyJson}\n\`\`\`\n\n`;
+      result += `:::details [Gönderilen JSON Verisi (${labelTitle} — ${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${prettyJson}\n\`\`\`\n:::\n\n`;
     } else {
       const trimmedBefore = beforeSlice.trimEnd();
       if (trimmedBefore) {
         result += `${trimmedBefore}\n\n`;
       }
-      result += `📦 **Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt):**\n\`\`\`json\n${prettyJson}\n\`\`\`\n\n`;
+      result += `:::details [Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${prettyJson}\n\`\`\`\n:::\n\n`;
     }
 
     cursor = endBrace + 1;
@@ -383,10 +349,8 @@ function formatOutgoingJsonContent(rawText: string, role: string): {
       const pretty = JSON.stringify(parsedFenceJson, null, 2);
       const byteLen = getUtf8ByteLength(fenceBody);
       const shapeDesc = describeJsonShape(parsedFenceJson);
-      const prevPart = parts.length > 0 ? parts[parts.length - 1] : '';
-      const alreadyLabeled = prevPart.includes('📦 **Gönderilen JSON Verisi');
       parts.push(
-        `${alreadyLabeled ? '' : `📦 **Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt):**\n`}\`\`\`json\n${pretty}\n\`\`\``
+        `:::details [Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${pretty}\n\`\`\`\n:::`
       );
     } else {
       parts.push(match[0]);
@@ -451,13 +415,13 @@ function formatOutgoingMessageWithFullTrace(
       responseFormat.type !== 'text'
     ) {
       outgoingSections.push(
-        `---\n📐 **Gönderilen Yanıt JSON Şeması (\`response_format\`):**\n\`\`\`json\n${JSON.stringify(responseFormat, null, 2)}\n\`\`\``
+        `:::details [Gönderilen Yanıt JSON Şeması (response_format)]\n\`\`\`json\n${JSON.stringify(responseFormat, null, 2)}\n\`\`\`\n:::`
       );
     }
 
     if (toolsList && toolsList.length > 0 && record.role === 'user') {
       outgoingSections.push(
-        `---\n🛠️ **LLM'e Gönderilen MCP Araç & JSON Şemaları (\`tools\` — ${toolsList.length} adet):**\n\`\`\`json\n${JSON.stringify(toolsList, null, 2)}\n\`\`\``
+        `:::details [LLM'e Gönderilen MCP Araç & JSON Şemaları (tools — ${toolsList.length} adet)]\n\`\`\`json\n${JSON.stringify(toolsList, null, 2)}\n\`\`\`\n:::`
       );
     }
   }
@@ -611,24 +575,16 @@ function formatAssistantMessageWithFullTrace(
     };
   }
 
-  if (rawRecordContent.includes('📥 **Gelen LLM İletişim Raporu:**')) {
-    return {
-      visibleContent: rawRecordContent,
-      cleanContentForHistory: cleanAnswer,
-      thinkingSummary: fullThinkingAccordion,
-    };
-  }
-
   const sections: string[] = [];
 
-  // 1. LLM Düşünce & İçsel Muhakeme Bölümü (Ayrı ve görünür blok)
+  // 1. LLM Düşünce & İçsel Muhakeme Bölümü ([Açıklama] > olarak açılır/kapanır)
   if (extractedThought) {
     sections.push(
-      `> 🧠 **LLM Düşünce & İçsel Muhakeme Süreci (Chain-of-Thought):**\n\`\`\`text\n${extractedThought}\n\`\`\``
+      `:::details [LLM Düşünce & İçsel Muhakeme Süreci (Chain-of-Thought)]\n\`\`\`text\n${extractedThought}\n\`\`\`\n:::`
     );
   } else {
     sections.push(
-      `> 🧠 **LLM Düşünce & Karar Süreci:**\n> Model (\`${record.model_id}\` · \`${record.provider || 'gateway'}\`) gelen istemi değerlendirerek **${record.ttft_ms || record.latency_ms || 0} ms** içinde ilk token'ı üretti ve toplam **${record.latency_ms || 0} ms** sürede **${getUtf8ByteLength(cleanAnswer)} bayt (${cleanAnswer.length} karakter)** uzunluğunda yanıt döndürdü.`
+      `:::details [LLM Düşünce & Karar Süreci]\nModel (\`${record.model_id}\` · \`${record.provider || 'gateway'}\`) gelen istemi değerlendirerek **${record.ttft_ms || record.latency_ms || 0} ms** içinde ilk token'ı üretti ve toplam **${record.latency_ms || 0} ms** sürede **${getUtf8ByteLength(cleanAnswer)} bayt (${cleanAnswer.length} karakter)** uzunluğunda yanıt döndürdü.\n:::`
     );
   }
 
@@ -645,7 +601,7 @@ function formatAssistantMessageWithFullTrace(
     !cleanAnswer.includes('```json')
   ) {
     sections.push(
-      `🔧 **Tetiklenen Araç Çağrıları (\`tool_calls\` — ${expandedToolCalls.length} adet):**\n\`\`\`json\n${JSON.stringify(expandedToolCalls, null, 2)}\n\`\`\``
+      `:::details [Tetiklenen Araç Çağrıları (tool_calls — ${expandedToolCalls.length} adet)]\n\`\`\`json\n${JSON.stringify(expandedToolCalls, null, 2)}\n\`\`\`\n:::`
     );
   }
 
@@ -658,7 +614,7 @@ function formatAssistantMessageWithFullTrace(
     rawUnfiltered.trim() !== rawContent.trim()
   ) {
     sections.push(
-      `📦 **Modelin Ham (Filtrelenmemiş / Normalize Edilmemiş) Çıktısı (${rawUnfiltered.length} krk):**\n\`\`\`text\n${rawUnfiltered}\n\`\`\``
+      `:::details [Modelin Ham (Filtrelenmemiş / Normalize Edilmemiş) Çıktısı (${rawUnfiltered.length} krk)]\n\`\`\`text\n${rawUnfiltered}\n\`\`\`\n:::`
     );
   }
 
@@ -711,11 +667,11 @@ function formatAssistantMessageWithFullTrace(
   }
 
   sections.push(
-    `📥 **Gelen LLM İletişim Raporu:**\n` +
+    `:::details [Gelen LLM İletişim Raporu]\n` +
     `- **İstek & Oturum:** \`İstek ID: ${reqId}\` · \`Oturum: ${sessionId}\` · \`Sağlayıcı: ${record.provider || 'gateway'}\` · \`Mod: ${streamLabel}\`\n` +
     `- **Yanıt Türü & Boyut:** ${responseTypeDesc} · \`${charLen} krk (${byteLen} bayt)\` · \`Durum: ${record.status || 'success'}\`\n` +
     `- **Token & Performans:** \`Girdi: ${record.prompt_tokens} tok\` · \`Çıktı: ${record.completion_tokens} tok\` · \`Toplam: ${record.total_tokens} tok\` · \`TTFT: ${record.ttft_ms || 0} ms\` · \`Toplam Süre: ${record.latency_ms || 0} ms\`${record.error_detail ? `\n- **Hata Detayı:** \`${record.error_detail}\`` : ''}\n` +
-    `\`\`\`json\n${JSON.stringify(incomingReportPayload, null, 2)}\n\`\`\``
+    `\`\`\`json\n${JSON.stringify(incomingReportPayload, null, 2)}\n\`\`\`\n:::`
   );
 
   return {
@@ -893,30 +849,38 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
   const navigate = useNavigate();
   const locale = i18n.language?.startsWith('en') ? 'en-US' : 'tr-TR';
 
+  // Başlangıç varsayılan değerleri (ChatStudioViewDefaultValue.tsx)
+  const initialDefaults = useMemo(
+    () =>
+      getChatStudioDefaultValues({
+        models,
+        users,
+        apiKeys,
+        selectedModelId,
+        apiKey,
+      }),
+    [] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   // Görünüm modu: 'list' (BaseListPage) veya 'chat' (BaseChatPage)
-  const [viewMode, setViewMode] = useState<'list' | 'chat'>('list');
-  const [listViewMode, setListViewMode] = useState<'active' | 'archive' | 'trash'>('active');
+  const [viewMode, setViewMode] = useState<'list' | 'chat'>(initialDefaults.viewMode);
+  const [listViewMode, setListViewMode] = useState<'active' | 'archive' | 'trash'>(
+    initialDefaults.listViewMode
+  );
 
-  // Aktif oturum açan kullanıcı (Varsayılan: API anahtarının sahibi veya sys_usr_01)
-  const initialUserId = useMemo(() => {
-    const matchedKey = apiKeys.find(
-      (k) => k.raw_preview && k.raw_preview.trim() === apiKey.trim()
-    );
-    if (matchedKey) return matchedKey.user_id;
-    return users[0]?.id || 'sys_usr_01';
-  }, [apiKeys, apiKey, users]);
-
-  const [activeUserId, setActiveUserId] = useState<string>(initialUserId);
-  const [adminSelectedUserFilter, setAdminSelectedUserFilter] = useState<string>('all');
+  const [activeUserId, setActiveUserId] = useState<string>(initialDefaults.activeUserId);
+  const [adminSelectedUserFilter, setAdminSelectedUserFilter] = useState<string>(
+    initialDefaults.adminSelectedUserFilter
+  );
   const [refreshCounter, setRefreshCounter] = useState<number>(0);
 
   // BaseChatPage oturum, model ve sistem yönergesi durumu
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatSessionId, setActiveChatSessionId] = useState<string | number>('');
-  const [chatModelId, setChatModelId] = useState<string>(
-    selectedModelId || models[0]?.id || 'gpt-4o'
+  const [chatModelId, setChatModelId] = useState<string>(initialDefaults.chatModelId);
+  const [chatSystemPrompt, setChatSystemPrompt] = useState<string>(
+    initialDefaults.chatSystemPrompt
   );
-  const [chatSystemPrompt, setChatSystemPrompt] = useState<string>('');
   const stopRequestedRef = useRef<boolean>(false);
 
   // Seçilen sohbetin mesaj detaylarını hızlı görmek için Popup durumu
@@ -925,29 +889,32 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
   const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
 
   // Sohbet sayfasında tam LLM iletişim ve düşünce raporu görünürlüğü (Varsayılan: Açık)
-  const [showFullTrace, setShowFullTrace] = useState<boolean>(true);
+  const [showFullTrace, setShowFullTrace] = useState<boolean>(initialDefaults.showFullTrace);
   const [rawInspectorOpen, setRawInspectorOpen] = useState<boolean>(false);
   const [activeDetailForInspector, setActiveDetailForInspector] =
     useState<ConversationDetailDTO | null>(null);
 
-  const handleToggleFullTrace = useCallback(() => {
-    setShowFullTrace((prev) => {
-      const next = !prev;
-      setChatSessions((sessions) =>
-        sessions.map((s) => ({
-          ...s,
-          messages: s.messages.map((m) => {
-            const rawRec = m.customData?.rawRecord as
-              | ConversationMessageRecordDTO
-              | undefined;
-            if (!rawRec) return m;
-            return mapRecordToBaseChatMessage(rawRec, chatSystemPrompt, next);
-          }),
-        }))
-      );
-      return next;
-    });
-  }, [chatSystemPrompt]);
+  const handleSetFullTrace = useCallback(
+    (nextValue?: boolean) => {
+      setShowFullTrace((prev) => {
+        const next = typeof nextValue === 'boolean' ? nextValue : !prev;
+        setChatSessions((sessions) =>
+          sessions.map((s) => ({
+            ...s,
+            messages: s.messages.map((m) => {
+              const rawRec = m.customData?.rawRecord as
+                | ConversationMessageRecordDTO
+                | undefined;
+              if (!rawRec) return m;
+              return mapRecordToBaseChatMessage(rawRec, chatSystemPrompt, next);
+            }),
+          }))
+        );
+        return next;
+      });
+    },
+    [chatSystemPrompt]
+  );
 
   const currentUser = useMemo(
     () => users.find((u) => u.id === activeUserId) || users[0],
@@ -1604,7 +1571,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             const liveSections: string[] = [];
             if (combinedLiveThoughts) {
               liveSections.push(
-                `> 🧠 **LLM Düşünce & İçsel Muhakeme Süreci ${hasUnclosedThink ? '(Canlı Düşünüyor...)' : '(Chain-of-Thought)'}:**\n\`\`\`text\n${combinedLiveThoughts}\n\`\`\``
+                `:::details [LLM Düşünce & İçsel Muhakeme Süreci ${hasUnclosedThink ? '(Canlı Düşünüyor...)' : '(Chain-of-Thought)'}]\n\`\`\`text\n${combinedLiveThoughts}\n\`\`\`\n:::`
               );
             }
             if (cleanText) {
@@ -1614,13 +1581,13 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             }
             if (streamedToolCalls.length > 0) {
               liveSections.push(
-                `---\n🔧 **Tetiklenen Araç Çağrıları (\`tool_calls\`):**\n\`\`\`json\n${JSON.stringify(streamedToolCalls, null, 2)}\n\`\`\``
+                `:::details [Tetiklenen Araç Çağrıları (tool_calls)]\n\`\`\`json\n${JSON.stringify(streamedToolCalls, null, 2)}\n\`\`\`\n:::`
               );
             }
             const rawLen = streamedText.length + streamedReasoning.length;
             const rawBytes = getUtf8ByteLength(streamedText + streamedReasoning);
             liveSections.push(
-              `---\n📡 **Canlı LLM Akışı (SSE Stream):** \`İstek ID: ${streamedRequestId || 'akışta...'}\` · \`Model: ${activeModel}\` · \`Alınan: ${rawLen} krk (${rawBytes} bayt)\` · \`TTFT: ${ttftMs} ms\` · \`Süre: ${Date.now() - requestStartTime} ms\``
+              `:::details [Canlı LLM Akışı (SSE Stream)]\n\`İstek ID: ${streamedRequestId || 'akışta...'}\` · \`Model: ${activeModel}\` · \`Alınan: ${rawLen} krk (${rawBytes} bayt)\` · \`TTFT: ${ttftMs} ms\` · \`Süre: ${Date.now() - requestStartTime} ms\`\n:::`
             );
             visibleLiveContent = liveSections.join('\n\n');
           } else {
@@ -2523,6 +2490,83 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         hidden: listViewMode !== 'active',
         onClick: handleOpenNewChatPage,
       },
+      ...(chatAgents.length > 0
+        ? [
+          {
+            dividerAbove: true,
+            custom: (
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  padding: '6px 10px',
+                  minWidth: '220px',
+                }}
+              >
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    color: 'var(--text-secondary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.03em',
+                  }}
+                >
+                  <Cpu size={13} />
+                  <span>Model Tercihi</span>
+                </span>
+                <select
+                  value={chatModelId}
+                  onChange={(e) => {
+                    const nextModelId = e.target.value;
+                    setChatModelId(nextModelId);
+                    onSelectModel(nextModelId);
+                  }}
+                  style={{
+                    height: '32px',
+                    padding: '0 8px',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--surface-secondary)',
+                    color: 'var(--text-primary)',
+                    cursor: 'pointer',
+                    outline: 'none',
+                    width: '100%',
+                  }}
+                >
+                  {chatAgents.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      🤖 {a.ad || a.modelAdi || 'Model'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ),
+          },
+        ]
+        : []),
+      {
+        dividerAbove: true,
+        custom: (
+          <BaseSwitch
+            className="action-menu-switch-item"
+            checked={showFullTrace}
+            onChange={(e) => handleSetFullTrace(e.target.checked)}
+            label={
+              <>
+                <Zap size={15} />
+                <span>Düşünce: {showFullTrace ? 'Açık' : 'Kapalı'}</span>
+              </>
+            }
+          />
+        ),
+      },
       ...(isAdmin && users.length > 0
         ? [
           {
@@ -2651,6 +2695,11 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
     [
       listViewMode,
       handleOpenNewChatPage,
+      chatAgents,
+      chatModelId,
+      onSelectModel,
+      showFullTrace,
+      handleSetFullTrace,
       isAdmin,
       users,
       adminSelectedUserFilter,
@@ -2677,15 +2726,39 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           .map((m) => m.customData?.rawRecord as ConversationMessageRecordDTO | undefined)
           .filter((r): r is ConversationMessageRecordDTO => Boolean(r));
 
+    const chatPageDropdownActions: ActionMenuItem[] = buildChatStudioPageDropdownActions({
+      showFullTrace,
+      onSetFullTrace: handleSetFullTrace,
+      inspectorMessagesCount: inspectorMessages.length,
+      onOpenRawInspector: async () => {
+        if (
+          activeChatSessionId &&
+          !String(activeChatSessionId).startsWith('new_')
+        ) {
+          try {
+            const latest = await conversationService.getConversationDetail(
+              String(activeChatSessionId),
+              authOptions
+            );
+            setActiveDetailForInspector(latest);
+          } catch {
+            // Mevcut veriyi kullan
+          }
+        }
+        setRawInspectorOpen(true);
+      },
+    });
+
     return (
       <>
         <BaseChatPage
-          title={activeSessionObj?.title || 'AI Sohbet Stüdyosu'}
-          subtitle={`${currentUser?.full_name || 'Kullanıcı'} — SQLite Kayıtlı Yapay Zeka Oturumu (Tam İletişim & Düşünce İzleme)`}
+          title={activeSessionObj?.title || 'Yeni Sohbet'}
+          recordTitle={activeSessionObj?.title || 'Yeni Sohbet'}
+          subtitle={`${currentUser?.full_name || 'Kullanıcı'} — PostgreSQL Kayıtlı Yapay Zeka Oturumu (Tam İletişim & Düşünce İzleme)`}
           subtitleLeft={`${currentUser?.full_name || 'Kullanıcı'}${currentUser?.email ? ` (${currentUser.email})` : ''} · ${cleanModelLabel}`}
           subtitleRight={
             activeChatMessages.length > 0
-              ? `${activeChatMessages.length} Mesaj · ${showFullTrace ? 'Tam İletişim & Düşünce Raporu Açık' : 'Öz Görünüm'}`
+              ? `${activeChatMessages.length} Mesaj · ${showFullTrace ? 'Düşünce: Açık' : 'Düşünce: Kapalı'}`
               : 'Yeni Oturum'
           }
           onTitleEdit={
@@ -2704,76 +2777,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           icon={<Sparkles size={22} />}
           showBackButton={true}
           onBack={handleBackToList}
-          headerActions={
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={handleToggleFullTrace}
-                title="LLM ile gidip gelen tüm sistem yönergelerini, araç şemalarını, dosya metinlerini, telemetriyi ve düşünce süreçlerini mesaj içinde göster/gizle"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  height: '32px',
-                  padding: '0 10px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  border: showFullTrace
-                    ? '1px solid var(--accent-primary, #6366f1)'
-                    : '1px solid var(--border-color, rgba(148,163,184,0.3))',
-                  background: showFullTrace
-                    ? 'rgba(99, 102, 241, 0.14)'
-                    : 'var(--surface-secondary, rgba(148,163,184,0.1))',
-                  color: showFullTrace
-                    ? 'var(--accent-primary, #6366f1)'
-                    : 'var(--text-secondary)',
-                }}
-              >
-                <Zap size={13} />
-                <span>{showFullTrace ? 'Tam İletişim & Düşünce: Açık' : 'Tam İletişim & Düşünce: Öz'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  if (
-                    activeChatSessionId &&
-                    !String(activeChatSessionId).startsWith('new_')
-                  ) {
-                    try {
-                      const latest = await conversationService.getConversationDetail(
-                        String(activeChatSessionId),
-                        authOptions
-                      );
-                      setActiveDetailForInspector(latest);
-                    } catch {
-                      // Mevcut veriyi kullan
-                    }
-                  }
-                  setRawInspectorOpen(true);
-                }}
-                title="LLM ile yapılan tüm ham JSON istek/yanıt paketlerini, karakter/bayt dökümlerini ve düşünce kayıtlarını incele"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  height: '32px',
-                  padding: '0 10px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  border: '1px solid var(--border-color, rgba(148,163,184,0.3))',
-                  background: 'var(--surface-secondary, rgba(148,163,184,0.1))',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                <Terminal size={13} />
-                <span>Ham LLM İletişim Kaydı ({inspectorMessages.length})</span>
-              </button>
-            </div>
-          }
+          extraDropdownActions={chatPageDropdownActions}
           sessions={chatSessions}
           activeSessionId={activeChatSessionId}
           messages={activeChatMessages}
@@ -2798,8 +2802,8 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           onAgentChange={handleChatAgentChange}
           defaultModel={chatModelId}
           suggestions={STUDIO_PROMPT_SUGGESTIONS}
-          showHistorySidebar={true}
-          defaultHistoryOpen={true}
+          showHistorySidebar={false}
+          defaultHistoryOpen={false}
           enableAttachments={true}
           enableThinkingDetails={true}
           enableResponseTimer={true}

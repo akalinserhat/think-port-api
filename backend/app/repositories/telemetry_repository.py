@@ -5,7 +5,7 @@ from typing import List, Optional
 from app.dtos.admin_dto import UsageLogDTO, GatewaySettingsDTO
 from app.dtos.image_dto import CachedImageDTO
 from app.repositories.state_store import InMemoryStateStore
-from app.repositories.sqlite_db import sqlite_db
+from app.repositories.postgres_db import sqlite_db
 
 
 class UsageRepository:

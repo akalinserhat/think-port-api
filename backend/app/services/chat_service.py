@@ -36,6 +36,11 @@ from app.services.message_formatter_service import MessageFormatterService
 from app.services.llm_provider_service import LlmProviderService
 from app.services.image_service import ImageService
 from app.services.document_service import DocumentService
+from app.services.agent_memory_service import (
+    agent_memory_service,
+    GATEWAY_MEMORY_TOOL_NAMES,
+)
+from app.repositories.postgres_db import postgres_db
 
 
 class ChatService:
@@ -83,11 +88,79 @@ class ChatService:
         provider = self._model_service.resolve_provider_for_model(normalized_model)
         normalized_rf = request.normalized_response_format()
         job_id = f"chatcmpl-{uuid.uuid4().hex[:20]}"
-        prompt_tokens = self._formatter.estimate_prompt_tokens(request.messages)
 
+        effective_app_id = (request.app_id or getattr(user_ctx, "app_id", None) or "").strip()
+        effective_agent_id = (
+            request.agent_id
+            or request.agent_code
+            or getattr(user_ctx, "agent_id", None)
+            or ""
+        ).strip()
+        norm_app, norm_agent = agent_memory_service.normalize_identity(
+            effective_app_id,
+            effective_agent_id,
+        )
+        if norm_app and not request.app_id:
+            request.app_id = norm_app
+        if norm_agent and not request.agent_id:
+            request.agent_id = norm_agent
         clean_user_text, attachments, system_prompt = (
             self._formatter.extract_last_user_message_details(request.messages)
         )
+        upper_sys = (system_prompt or "").upper()
+        upper_usr = (clean_user_text or "").upper()
+        is_explicit_no_tools = (
+            isinstance(request.tool_choice, str)
+            and request.tool_choice.strip().lower() == "none"
+        )
+        is_pure_extraction_without_tools = (
+            not request.tools
+            and (
+                bool(attachments)
+                or "AKIŞ HAFIZA & SCRIPT HATTI AKTİF" in upper_sys
+                or "ARAÇ ÇAĞIRMA" in upper_sys
+                or "ARAÇ ÇAĞIRMAYINIZ" in upper_sys
+                or "SADECE CSV" in upper_sys
+                or "SADECE CSV" in upper_usr
+                or "ARAÇ ÇAĞIRMA" in upper_usr
+            )
+        )
+        if is_explicit_no_tools or is_pure_extraction_without_tools:
+            request.tools = None
+            request.tool_choice = None
+
+        gozlemci_aktif_mi = True
+        if norm_agent:
+            agent_cfg = agent_memory_service.ensure_agent_registered_and_get_config(
+                app_id=norm_app,
+                agent_id=norm_agent,
+                agent_name=request.agent_name,
+                model_id=normalized_model,
+            )
+            gozlemci_aktif_mi = bool(agent_cfg.get("gozlemci_aktif_mi", True))
+            if not (is_explicit_no_tools or is_pure_extraction_without_tools):
+                injected_tools, mem_instruction = (
+                    agent_memory_service.inject_memory_tools_and_instructions(
+                        existing_tools=request.tools,
+                        app_id=norm_app,
+                        agent_id=norm_agent,
+                        agent_config=agent_cfg,
+                    )
+                )
+                if injected_tools:
+                    request.tools = injected_tools
+                if mem_instruction and request.messages:
+                    sys_msg = next((m for m in request.messages if m.role in ("system", "developer")), None)
+                    if sys_msg and isinstance(sys_msg.content, str):
+                        if "thinkport_memory_search" not in sys_msg.content:
+                            sys_msg.content = f"{sys_msg.content.rstrip()}{mem_instruction}"
+                    else:
+                        request.messages.insert(
+                            0,
+                            ChatMessageDTO(role="system", content=mem_instruction.strip()),
+                        )
+
+        prompt_tokens = self._formatter.estimate_prompt_tokens(request.messages)
         source = (
             "studio"
             if request.source == "studio"
@@ -110,6 +183,15 @@ class ChatService:
             source=source,
             initial_title=initial_title,
         )
+        if norm_agent:
+            try:
+                with postgres_db.connection() as conn:
+                    conn.execute(
+                        "UPDATE chat_conversations SET app_id = ?, agent_id = ? WHERE id = ?",
+                        (norm_app, norm_agent, conversation.id),
+                    )
+            except Exception:
+                pass
 
         last_msg = request.messages[-1] if request.messages else None
         if last_msg and last_msg.role == "tool":
@@ -258,9 +340,13 @@ class ChatService:
             response_format=normalized_rf,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
+            app_id=norm_app,
+            agent_id=norm_agent,
+            gozlemci_aktif_mi=gozlemci_aktif_mi,
         )
         gateway_logger.info(
             f"CHAT_START | id={job_id} | conv={conversation.id} | user={user_ctx.user_id} "
+            f"| app={norm_app or '-'} | agent={norm_agent or '-'} "
             f"| requested_model={request.model} | resolved_model={normalized_model} "
             f"| tools={bool(request.tools)} "
             f"| json_mode={self._formatter.is_json_mode_requested(normalized_rf)} "
@@ -269,18 +355,359 @@ class ChatService:
         asyncio.create_task(self._execute_ai_job(job))
         return job
 
-    async def build_sync_response(self, job: ChatJobDTO) -> ChatCompletionResponseDTO:
-        """Kanaldan tüm yanıt parçalarını toplar, JSON modundaysa ayıklar ve OpenAI senkron yanıt DTO'su oluşturur."""
-        full_content, completion_tokens, _, _, tool_calls, reasoning_text = await self._collect_full_response(job)
-        if self._formatter.is_json_mode_requested(job.response_format) and full_content:
+    async def build_sync_response(
+        self,
+        job: ChatJobDTO,
+        user_ctx: Optional[AuthenticatedUserContextDTO] = None,
+    ) -> ChatCompletionResponseDTO:
+        """
+        Kanaldan tüm yanıt parçalarını toplar.
+        1. Eğer model `thinkport_memory_*` hafıza aracını çağırdıysa, çağrıyı doğrudan Gateway (pgvector)
+           içerisinde çalıştırıp sonucu modele geri besler.
+        2. Eğer yanıt token sınırı nedeniyle yarıda kesildiyse ve Gözlemci Ajan (`GOZLEMCI_AJAN`) aktifse,
+           otomatik devam istemi üreterek yanıtı birleştirir.
+        """
+        current_job = job
+        full_content, completion_tokens, _, _, tool_calls, reasoning_text = await self._collect_full_response(current_job)
+
+        # 1. Gateway-Seviyesi pgvector Ajan Hafızası Tool Call Yakalama (Maksimum 2 Tur)
+        for _mem_step in range(2):
+            if not tool_calls or not current_job.agent_id:
+                break
+            called_names = [
+                str((tc.get("function") or {}).get("name") or "")
+                for tc in tool_calls
+                if isinstance(tc, dict)
+            ]
+            if not called_names or not all(n in GATEWAY_MEMORY_TOOL_NAMES for n in called_names):
+                break
+
+            followup_messages = list(current_job.messages)
+            followup_messages.append(
+                ChatMessageDTO(
+                    role="assistant",
+                    content=full_content or "",
+                    tool_calls=tool_calls,
+                )
+            )
+            for tc in tool_calls:
+                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                fn_name = str(fn.get("name") or "")
+                fn_args = fn.get("arguments")
+                call_id = str(tc.get("id") or f"call_mem_{uuid.uuid4().hex[:8]}")
+                tool_out = agent_memory_service.execute_gateway_memory_tool(
+                    tool_name=fn_name,
+                    raw_arguments=fn_args,
+                    app_id=current_job.app_id,
+                    agent_id=current_job.agent_id,
+                    conversation_id=current_job.conversation_id,
+                )
+                followup_messages.append(
+                    ChatMessageDTO(
+                        role="tool",
+                        name=fn_name,
+                        tool_call_id=call_id,
+                        content=tool_out,
+                    )
+                )
+
+            if user_ctx is None:
+                break
+
+            followup_req = ChatCompletionRequestDTO(
+                model=current_job.requested_model or current_job.model,
+                messages=followup_messages,
+                tools=current_job.tools,
+                tool_choice=current_job.tool_choice,
+                stream=False,
+                temperature=current_job.temperature,
+                max_tokens=current_job.max_tokens,
+                response_format=current_job.response_format,
+                conversation_id=current_job.conversation_id,
+                source="api",
+                app_id=current_job.app_id,
+                agent_id=current_job.agent_id,
+            )
+            current_job = self.initiate_chat_job(followup_req, user_ctx)
+            next_content, next_tokens, _, _, next_tcs, next_reasoning = await self._collect_full_response(current_job)
+            full_content = next_content
+            completion_tokens += next_tokens
+            tool_calls = next_tcs
+            if next_reasoning:
+                reasoning_text = f"{reasoning_text}\n\n{next_reasoning}".strip() if reasoning_text else next_reasoning
+
+        # 2. Gözlemci Ajan (GOZLEMCI_AJAN) Kesinti Tespiti & Otomatik Yanıt Tamamlama
+        is_json_mode = self._formatter.is_json_mode_requested(current_job.response_format)
+        if current_job.gozlemci_aktif_mi and user_ctx is not None:
+            clean_user_text, req_attachments, _ = self._formatter.extract_last_user_message_details(
+                job.messages
+            )
+            has_attached_doc_for_observer = bool(req_attachments) or len(clean_user_text or "") > 1500
+            prepared_orig = self._formatter.prepare_messages(
+                job.messages,
+                response_format=job.response_format,
+                merge_system_into_user=False,
+            )
+
+            # 2A. Araç Çağrısı (tool_calls) Kesinti / Eksik Aktarım Denetimi ve Tamamlama
+            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                primary_tc = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+                fn_obj = (primary_tc.get("function") or {}) if isinstance(primary_tc, dict) else {}
+                tc_name = str(fn_obj.get("name") or "tool")
+                raw_args = fn_obj.get("arguments")
+
+                salvaged_dict, is_json_truncated, cut_off_tail = (
+                    agent_memory_service.salvage_generic_json_arguments(raw_args)
+                )
+                if salvaged_dict is not None and isinstance(primary_tc.get("function"), dict):
+                    primary_tc["function"]["arguments"] = json.dumps(
+                        salvaged_dict, ensure_ascii=False
+                    )
+
+                should_inspect_tool_call = salvaged_dict is not None and (
+                    is_json_truncated or bool(req_attachments) or len(clean_user_text or "") > 1500
+                )
+
+                if should_inspect_tool_call and salvaged_dict is not None:
+                    for obs_step in range(1, 4):
+                        needs_cont, obs_reason, cont_prompt = await asyncio.to_thread(
+                            agent_memory_service.evaluate_with_observer_agent,
+                            self._llm_provider,
+                            self._model_service,
+                            prepared_orig.text_only_messages,
+                            full_content or "",
+                            tc_name,
+                            salvaged_dict,
+                            is_json_truncated,
+                            cut_off_tail,
+                        )
+                        current_items_count = agent_memory_service.count_json_array_items(
+                            salvaged_dict
+                        )
+                        gateway_logger.info(
+                            f"OBSERVER_INSPECTION | id={current_job.job_id} | step={obs_step} "
+                            f"| app={current_job.app_id} | agent={current_job.agent_id} | tool={tc_name} "
+                            f"| items={current_items_count} | json_truncated={is_json_truncated} "
+                            f"| needs_continuation={needs_cont} | reason={obs_reason}"
+                        )
+                        obs_trace_line = (
+                            f"🛡️ [GOZLEMCI_AJAN DENETİMİ (Tur {obs_step})]: "
+                            f"Çıkarılan Kayıt={current_items_count} | JSON Kesildi Mi={is_json_truncated} "
+                            f"| Devam Gerekli Mi={needs_cont} | Neden={obs_reason}"
+                        )
+                        reasoning_text = (
+                            f"{reasoning_text}\n\n{obs_trace_line}".strip()
+                            if reasoning_text
+                            else obs_trace_line
+                        )
+                        if not needs_cont or not cont_prompt:
+                            break
+
+                        last_items_preview = json.dumps(
+                            agent_memory_service.extract_last_array_items(salvaged_dict, 4),
+                            ensure_ascii=False,
+                        )
+                        compact_prev_dict = agent_memory_service.build_compact_continuation_preview(
+                            salvaged_dict
+                        )
+                        cont_user_directive = (
+                            f"[GOZLEMCI_AJAN SANAL EXCEL TABLOSU DEVAM YÖNERGESİ (Tur {obs_step})]\n"
+                            f"{cont_prompt}\n\n"
+                            f"Şu ana kadar üretilen ve hafızaya alınan toplam kayıt sayısı: {current_items_count}.\n"
+                            f"En son üretilen 4 kayıt (#{max(1, current_items_count - 3)}..#{current_items_count}): {last_items_preview}\n"
+                            f"KRİTİK AKTARIM KURALLARI:\n"
+                            f"1) Önceki {current_items_count} kaydı KESİNLİKLE tekrar üretme! `{tc_name}` aracını çağırırken dizi içerisine YALNIZCA yukarıda GOZLEMCI_AJAN tarafından çıkarılan Sanal Excel/CSV tablosundaki (veya belgedeki hedef tabloların kalan bölümündeki) YENİ satırları sırasıyla ekle.\n"
+                            f"2) SIFIR UYDURMA VERİ KURALI: Kesinlikle tahmin yoluyla veya önceki ürün kodunun içindeki sayıları artırarak/değiştirerek uydurma ürün kodu üretme! Yalnızca yukarıdaki Sanal Excel/CSV listesinde ve belgedeki hedef tablolarda fiziksel olarak yer alan gerçek satırları aktar.\n"
+                            f"3) SADECE SALT ÜRÜN KODU KURALI: `tedarikciUrunKodu` alanına 1. sütundaki Ürün Grubu / kategori ibarelerini (fırın, davlumbaz, bulaşık, kurutma, ocak, derin dondurucu, kapasite veya grup sınıfı vb.) KESİNLİKLE EKLEME; yalnızca boşluksuz, tek kelimelik salt alfanümerik model/ürün kodunu yaz ve harf öneki değişimlerini birebir koru.\n"
+                            f"4) KAPSAM DIŞI TABLO VE DEVAM SAYFALARI YASAĞI: Hariç tutulan tablo başlığına (örn: 'Aile Bakanlığı Modelleri') ulaşıldığında okumayı tamamen durdur; o tabloyu ve sonraki devam sayfalarındaki hiçbir satırını kesinlikle ekleme."
+                        )
+                        base_text_messages = [
+                            ChatMessageDTO(
+                                role=str(m.get("role") or "user"),
+                                content=str(m.get("content") or ""),
+                            )
+                            for m in prepared_orig.text_only_messages
+                        ]
+                        cont_messages = base_text_messages + [
+                            ChatMessageDTO(
+                                role="assistant",
+                                content=json.dumps(compact_prev_dict, ensure_ascii=False),
+                            ),
+                            ChatMessageDTO(role="user", content=cont_user_directive),
+                        ]
+                        cont_req = ChatCompletionRequestDTO(
+                            model=current_job.requested_model or current_job.model,
+                            messages=cont_messages,
+                            tools=current_job.tools,
+                            tool_choice={"type": "function", "function": {"name": tc_name}}
+                            if current_job.tools
+                            else None,
+                            stream=False,
+                            temperature=0.1,
+                            max_tokens=current_job.max_tokens,
+                            conversation_id=current_job.conversation_id,
+                            source="api",
+                            app_id=current_job.app_id,
+                            agent_id=current_job.agent_id,
+                        )
+                        cont_job = self.initiate_chat_job(cont_req, user_ctx)
+                        (
+                            cont_content,
+                            cont_tokens,
+                            _,
+                            _,
+                            cont_tcs,
+                            cont_reasoning,
+                        ) = await self._collect_full_response(cont_job)
+                        completion_tokens += cont_tokens
+                        if cont_reasoning:
+                            reasoning_text = (
+                                f"{reasoning_text}\n\n{cont_reasoning}".strip()
+                                if reasoning_text
+                                else cont_reasoning
+                            )
+
+                        next_raw_args: Any = None
+                        if cont_tcs and isinstance(cont_tcs, list) and len(cont_tcs) > 0:
+                            first_cont_tc = cont_tcs[0] if isinstance(cont_tcs[0], dict) else {}
+                            next_raw_args = (first_cont_tc.get("function") or {}).get("arguments")
+                        elif cont_content:
+                            next_raw_args = cont_content
+
+                        if not next_raw_args:
+                            break
+
+                        next_dict, is_json_truncated, cut_off_tail = (
+                            agent_memory_service.salvage_generic_json_arguments(next_raw_args)
+                        )
+                        if not next_dict:
+                            break
+
+                        salvaged_dict, added_count = (
+                            agent_memory_service.merge_generic_json_arguments(
+                                salvaged_dict, next_dict
+                            )
+                        )
+                        primary_tc["function"]["arguments"] = json.dumps(
+                            salvaged_dict, ensure_ascii=False
+                        )
+                        tool_calls = [primary_tc]
+                        gateway_logger.info(
+                            f"OBSERVER_CONTINUATION_MERGED | id={current_job.job_id} | step={obs_step} "
+                            f"| added_items={added_count} "
+                            f"| total_items={agent_memory_service.count_json_array_items(salvaged_dict)}"
+                        )
+                        if added_count == 0:
+                            break
+
+            # 2B. Metin / CSV / JSON Yanıtı (full_content) Kesinti Denetimi ve Tamamlama
+            elif not tool_calls and full_content:
+                is_truncated, trunc_reason = agent_memory_service.detect_response_truncation(
+                    content=full_content,
+                    finish_reason="stop",
+                    is_json_mode=is_json_mode,
+                )
+                csv_data_rows = [
+                    ln.strip()
+                    for ln in full_content.splitlines()
+                    if ";" in ln
+                    and not ln.strip().startswith("#")
+                    and not ln.strip().lower().startswith("urunkodu;")
+                    and not ln.strip().lower().startswith("ürünkodu;")
+                ]
+                is_csv_table_output = has_attached_doc_for_observer and len(csv_data_rows) >= 5
+                needs_csv_observer_check = is_csv_table_output and len(csv_data_rows) < 90
+                if is_csv_table_output and not is_truncated and len(csv_data_rows) >= 90:
+                    gateway_logger.info(
+                        f"OBSERVER_CSV_VERIFIED_COMPLETE | id={current_job.job_id} | rows={len(csv_data_rows)} | reason=primary_csv_complete"
+                    )
+                elif is_truncated or needs_csv_observer_check:
+                    for obs_csv_step in range(1, 3):
+                        needs_cont, obs_reason, cont_directive = await asyncio.to_thread(
+                            agent_memory_service.evaluate_with_observer_agent,
+                            self._llm_provider,
+                            self._model_service,
+                            prepared_orig.text_only_messages,
+                            full_content,
+                            None,
+                            None,
+                            is_truncated,
+                            full_content[-350:],
+                        )
+                        if not needs_cont:
+                            gateway_logger.info(
+                                f"OBSERVER_CSV_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_csv_step} | reason={obs_reason}"
+                            )
+                            break
+
+                        gateway_logger.info(
+                            f"OBSERVER_CONTINUATION_TRIGGERED | id={current_job.job_id} | step={obs_csv_step} | app={current_job.app_id} | agent={current_job.agent_id} | reason={obs_reason or trunc_reason}"
+                        )
+                        if is_csv_table_output and cont_directive and ";" in cont_directive:
+                            # Gözlemci eksik CSV satırlarını doğrudan continuation_prompt içinde verdiyse hemen birleştir
+                            merged_csv, direct_added = agent_memory_service.merge_csv_continuation(
+                                full_content, cont_directive
+                            )
+                            if direct_added > 0:
+                                full_content = merged_csv
+                                gateway_logger.info(
+                                    f"OBSERVER_CSV_DIRECT_MERGED | id={current_job.job_id} | step={obs_csv_step} | added_rows={direct_added}"
+                                )
+                                is_truncated = False
+                                break
+
+                        if not cont_directive:
+                            cont_directive = agent_memory_service.get_observer_continuation_directive(
+                                tail_snippet=full_content[-350:],
+                                reason=obs_reason or trunc_reason,
+                            )
+                        cont_messages = list(current_job.messages) + [
+                            ChatMessageDTO(role="assistant", content=full_content),
+                            ChatMessageDTO(role="user", content=cont_directive),
+                        ]
+                        cont_req = ChatCompletionRequestDTO(
+                            model=current_job.requested_model or current_job.model,
+                            messages=cont_messages,
+                            tools=None,
+                            tool_choice="none",
+                            stream=False,
+                            temperature=0.1,
+                            max_tokens=current_job.max_tokens,
+                            conversation_id=current_job.conversation_id,
+                            source="api",
+                            app_id=current_job.app_id,
+                            agent_id=current_job.agent_id,
+                        )
+                        cont_job = self.initiate_chat_job(cont_req, user_ctx)
+                        cont_content, cont_tokens, _, _, _, _ = await self._collect_full_response(
+                            cont_job
+                        )
+                        if cont_content:
+                            if is_csv_table_output:
+                                full_content, added_csv_rows = agent_memory_service.merge_csv_continuation(
+                                    full_content, cont_content
+                                )
+                                completion_tokens += cont_tokens
+                                if added_csv_rows == 0:
+                                    break
+                            else:
+                                full_content = agent_memory_service.merge_continued_response(
+                                    full_content, cont_content
+                                )
+                                completion_tokens += cont_tokens
+                                break
+                        else:
+                            break
+
+        if is_json_mode and full_content:
             full_content = self._formatter.extract_and_normalize_json_content(full_content)
             completion_tokens = DocumentService.estimate_tokens(full_content)
 
         finish_reason = "tool_calls" if tool_calls else "stop"
         return ChatCompletionResponseDTO(
-            id=job.job_id,
-            model=job.model,
-            conversation_id=job.conversation_id,
+            id=current_job.job_id,
+            model=current_job.model,
+            conversation_id=current_job.conversation_id,
             choices=[
                 ChatCompletionChoiceDTO(
                     index=0,
@@ -295,9 +722,9 @@ class ChatService:
                 )
             ],
             usage=CompletionUsageDTO(
-                prompt_tokens=job.prompt_tokens,
+                prompt_tokens=current_job.prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=job.prompt_tokens + completion_tokens,
+                total_tokens=current_job.prompt_tokens + completion_tokens,
             ),
         )
 
@@ -571,7 +998,7 @@ class ChatService:
             )
 
         if status == "timeout" or (
-            status == "error" and not full_text and not collected_tool_calls and not combined_reasoning
+            status == "error" and not full_text and not collected_tool_calls
         ):
             raise gateway_timeout_error(
                 message=error_detail
@@ -751,6 +1178,16 @@ class ChatService:
             error_detail=error_detail,
             auto_update_title=False,
         )
+
+        if job.app_id and job.agent_id and status == "success" and not tc_list and (response_preview or raw_unfiltered):
+            agent_memory_service.record_interaction_memory(
+                app_id=job.app_id,
+                agent_id=job.agent_id,
+                conversation_id=job.conversation_id,
+                request_id=job.job_id,
+                prompt_text=clean_user_text,
+                response_text=response_preview or raw_unfiltered,
+            )
 
         self._record_usage(
             RecordUsageInputDTO(

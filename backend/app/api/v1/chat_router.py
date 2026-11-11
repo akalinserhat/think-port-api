@@ -1,5 +1,6 @@
 from __future__ import annotations
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import StreamingResponse
 from app.core.dependencies import get_chat_service, require_authenticated_user
 from app.dtos.chat_dto import ChatCompletionRequestDTO, ChatCompletionResponseDTO
@@ -27,8 +28,33 @@ async def create_chat_completion(
     request: ChatCompletionRequestDTO,
     user_ctx: AuthenticatedUserContextDTO = Depends(require_authenticated_user),
     chat_service: ChatService = Depends(get_chat_service),
+    x_app_id: Optional[str] = Header(default=None, alias="X-App-Id"),
+    x_application_id: Optional[str] = Header(default=None, alias="X-Application-Id"),
+    x_agent_id: Optional[str] = Header(default=None, alias="X-Agent-Id"),
+    x_agent_code: Optional[str] = Header(default=None, alias="X-Agent-Code"),
+    x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
 ) -> StreamingResponse | ChatCompletionResponseDTO:
     """OpenAI uyumlu sohbet tamamlama (SSE streaming veya senkron JSON) uç noktası."""
+    # Tenant & Agent synchronization with authenticated context to prevent tenant impersonation
+    if user_ctx.app_id:
+        request.app_id = user_ctx.app_id
+    else:
+        fallback_app = (x_app_id or "").strip() or (x_application_id or "").strip() or None
+        request.app_id = (request.app_id or "").strip() or fallback_app
+        user_ctx.app_id = request.app_id
+
+    if user_ctx.agent_id:
+        request.agent_id = user_ctx.agent_id
+    else:
+        fallback_agent = (x_agent_id or "").strip() or (x_agent_code or "").strip() or None
+        effective_agent = (request.agent_id or "").strip() or (request.agent_code or "").strip() or fallback_agent
+        if effective_agent:
+            request.agent_id = effective_agent
+            user_ctx.agent_id = effective_agent
+
+    if not request.agent_name and x_agent_name:
+        request.agent_name = x_agent_name.strip() if x_agent_name else None
+
     job = chat_service.initiate_chat_job(request, user_ctx)
     if request.stream:
         headers = {**SSE_HEADERS, "X-Conversation-Id": job.conversation_id}
@@ -37,7 +63,7 @@ async def create_chat_completion(
             media_type="text/event-stream",
             headers=headers,
         )
-    return await chat_service.build_sync_response(job)
+    return await chat_service.build_sync_response(job, user_ctx=user_ctx)
 
 
 for _chat_path in CHAT_COMPLETION_PATHS:
