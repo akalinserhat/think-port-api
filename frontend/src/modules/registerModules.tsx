@@ -12,6 +12,7 @@ import {
   createDefaultEmailTemplates,
 } from '@akalin/email_module';
 import { createGlobalSearchModule } from '@akalin/global_search_module';
+import { createAuthModule } from '@akalin/user_auth_module';
 
 let isInitialized = false;
 
@@ -35,6 +36,16 @@ export function initializeGatewayModules(): void {
     allowMultipleFilterTypes: true,
   });
   ModuleRegistry.register(globalSearchModule as any);
+
+  // 1.b) @akalin/user_auth_module — Merkezi Kimlik Doğrulama (Login) Modülü
+  const authModule = createAuthModule({
+    id: 'auth',
+    title: 'Kimlik Doğrulama',
+    loginRoute: '/login',
+    order: 99,
+    isCore: true,
+  });
+  ModuleRegistry.register(authModule);
 
   // 2) @akalin/email_module — E-Posta, SMTP & Şablon Yönetimi Modülü
   const emailModule = createEmailModule({

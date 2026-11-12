@@ -1193,6 +1193,54 @@ export default defineConfig({
         find: /^@akalin\/global[-_]search[-_]module$/,
         replacement: path.resolve(__dirname, 'node_modules/@akalin/global_search_module/src/index.ts'),
       },
+      {
+        find: /^@akalin\/user[-_]auth[-_]module$/,
+        replacement: path.resolve(__dirname, '../../akalin-user-auth-module/src/index.ts'),
+      },
+      {
+        find: 'react/jsx-runtime',
+        replacement: path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
+      },
+      {
+        find: 'react/jsx-dev-runtime',
+        replacement: path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js'),
+      },
+      {
+        find: 'react-dom/client',
+        replacement: path.resolve(__dirname, 'node_modules/react-dom/client.js'),
+      },
+      {
+        find: /^react$/,
+        replacement: path.resolve(__dirname, 'node_modules/react'),
+      },
+      {
+        find: /^react-dom$/,
+        replacement: path.resolve(__dirname, 'node_modules/react-dom'),
+      },
+      {
+        find: /^react-router-dom$/,
+        replacement: path.resolve(__dirname, 'node_modules/react-router-dom'),
+      },
+      {
+        find: /^react-i18next$/,
+        replacement: path.resolve(__dirname, 'node_modules/react-i18next'),
+      },
+      {
+        find: /^i18next$/,
+        replacement: path.resolve(__dirname, 'node_modules/i18next'),
+      },
+      {
+        find: /^react-hot-toast$/,
+        replacement: path.resolve(__dirname, 'node_modules/react-hot-toast'),
+      },
+      {
+        find: /^lucide-react$/,
+        replacement: path.resolve(__dirname, 'node_modules/lucide-react'),
+      },
+      {
+        find: /^axios$/,
+        replacement: path.resolve(__dirname, 'node_modules/axios'),
+      },
     ],
     dedupe: [
       'react',
@@ -1218,6 +1266,8 @@ export default defineConfig({
       '@akalin/email-module',
       '@akalin/global_search_module',
       '@akalin/global-search-module',
+      '@akalin/user_auth_module',
+      '@akalin/user-auth-module',
     ],
     extensions: ['.tsx', '.jsx'],
     include: [
@@ -1236,6 +1286,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    fs: {
+      allow: [path.resolve(__dirname, '..'), path.resolve(__dirname, '../..')],
+    },
     watch: {
       ignored: ['!**/node_modules/@akalin/ui/**'],
     },

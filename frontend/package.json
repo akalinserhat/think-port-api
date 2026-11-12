@@ -15,6 +15,7 @@
     "@akalin/global_search_module": "github:akalinserhat/akalin-global-search-module#main",
     "@akalin/module_core": "github:akalinserhat/akalin-module-core#main",
     "@akalin/ui": "github:akalinserhat/akalin-ui#main",
+    "@akalin/user_auth_module": "github:akalinserhat/akalin-user-auth-module#main",
     "axios": "^1.7.9",
     "i18next": "^23.16.4",
     "lucide-react": "^1.0.0",

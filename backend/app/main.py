@@ -1,3 +1,8 @@
+"""
+ThinkPort AI Gateway - Ana FastAPI Uygulama Fabrikası (main.py).
+OpenAI v1 uyumlu sohbet/model/görsel uç noktalarını, PostgreSQL pgvector RAG yönlendiricisini
+ve yönetim (Admin/Studio UI) yönlendiricilerini yapılandırır.
+"""
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,6 +11,7 @@ from app.core.config import settings
 from app.api.v1.models_router import router as models_router
 from app.api.v1.chat_router import router as chat_router
 from app.api.v1.images_router import router as images_router
+from app.api.v1.rag_router import router as rag_router
 from app.api.admin.state_router import router as admin_state_router, api_agents_router
 from app.api.admin.users_router import router as admin_users_router
 from app.api.admin.api_keys_router import router as admin_api_keys_router
@@ -59,10 +65,11 @@ def mount_frontend_assets(application: FastAPI) -> None:
 
 
 def register_routers(application: FastAPI) -> None:
-    """Tüm OpenAI v1, Admin ve UI yönlendiricilerini (Controller/Router) kaydeder."""
+    """Tüm OpenAI v1, RAG, Admin ve UI yönlendiricilerini (Controller/Router) kaydeder."""
     application.include_router(models_router)
     application.include_router(chat_router)
     application.include_router(images_router)
+    application.include_router(rag_router)
     application.include_router(admin_state_router)
     application.include_router(api_agents_router)
     application.include_router(admin_users_router)

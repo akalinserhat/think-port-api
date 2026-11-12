@@ -27,7 +27,19 @@
       "@akalin/email_module": ["./node_modules/@akalin/email_module/src/index.ts"],
       "@akalin/email-module": ["./node_modules/@akalin/email_module/src/index.ts"],
       "@akalin/global_search_module": ["./node_modules/@akalin/global_search_module/src/index.ts"],
-      "@akalin/global-search-module": ["./node_modules/@akalin/global_search_module/src/index.ts"]
+      "@akalin/global-search-module": ["./node_modules/@akalin/global_search_module/src/index.ts"],
+      "@akalin/user_auth_module": ["../../akalin-user-auth-module/src/index.ts"],
+      "@akalin/user-auth-module": ["../../akalin-user-auth-module/src/index.ts"],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"],
+      "react-router-dom": ["./node_modules/react-router-dom"],
+      "react-i18next": ["./node_modules/react-i18next"],
+      "i18next": ["./node_modules/i18next"],
+      "react-hot-toast": ["./node_modules/react-hot-toast"],
+      "lucide-react": ["./node_modules/lucide-react"],
+      "axios": ["./node_modules/axios"]
     }
   },
   "include": ["src", "vite.config.ts"]

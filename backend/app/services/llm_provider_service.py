@@ -33,6 +33,7 @@ class LlmProviderService:
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
         max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """Yerel Ollama /v1/chat/completions uç noktasından gerçek zamanlı SSE akışı okur."""
         t0 = time.perf_counter()
@@ -70,6 +71,7 @@ class LlmProviderService:
                 max_duration_sec=float(settings.ollama_timeout_sec),
                 on_tool_calls=on_tool_calls,
                 on_reasoning=on_reasoning,
+                on_finish_reason=on_finish_reason,
             )
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
@@ -95,6 +97,7 @@ class LlmProviderService:
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
         max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
         Web AI sağlayıcısından (text.pollinations.ai/openai) gerçek zamanlı SSE akışı okur.
@@ -135,6 +138,7 @@ class LlmProviderService:
             on_tool_calls=on_tool_calls,
             on_reasoning=on_reasoning,
             max_tokens=max_tokens,
+            on_finish_reason=on_finish_reason,
         ):
             return True
 
@@ -147,6 +151,7 @@ class LlmProviderService:
             on_delta,
             requested_model_id,
             response_format=response_format,
+            on_finish_reason=on_finish_reason,
         )
 
     def _try_pollinations_openai_endpoint(
@@ -162,15 +167,26 @@ class LlmProviderService:
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
         max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
         _retry_count: int = 0,
     ) -> bool:
         """text.pollinations.ai/openai uç noktasından chunked-safe SSE veya JSON yanıtı okur."""
         t0 = time.perf_counter()
-        effort = (
+        effort: Optional[str] = (
             "low"
             if bool(tools)
             else ("high" if requested_model_id == "deepseek-r1" else "low")
         )
+        captured_finish_reason: List[str] = ["stop"]
+        last_stream_error: List[str] = [""]
+
+        def _record_finish(fr: str) -> None:
+            captured_finish_reason[-1] = fr
+            if on_finish_reason:
+                on_finish_reason(fr)
+
+        def _record_stream_error(err_msg: str) -> None:
+            last_stream_error[-1] = err_msg or ""
 
         def _execute_single_pollinations_call(
             msgs: List[Dict[str, Any]],
@@ -179,6 +195,8 @@ class LlmProviderService:
             seed_offset: int = 0,
             retry_idx: int = 0,
         ) -> bool:
+            nonlocal effort
+            last_stream_error[-1] = ""
             context = create_verified_ssl_context()
             conn = http.client.HTTPSConnection(
                 settings.pollinations_host,
@@ -206,21 +224,25 @@ class LlmProviderService:
                     else tool_choice
                 )
                 effective_msgs = msgs
-                if not tools and requested_model_id != "deepseek-r1" and msgs:
+                if requested_model_id != "deepseek-r1" and msgs:
                     effective_msgs = [dict(m) for m in msgs]
                     last_m = dict(effective_msgs[-1])
                     no_draft_hint = (
-                        "\n\n[CRITICAL STREAMING DIRECTIVE: Do NOT copy, list, or draft rows inside your internal "
+                        "\n\n[CRITICAL TOOL DIRECTIVE: Do NOT draft, list, or rehearse items inside internal "
+                        "reasoning/thinking! Keep internal thinking under 1 short sentence and write all output directly inside the tool call arguments.]"
+                        if tools
+                        else "\n\n[CRITICAL STREAMING DIRECTIVE: Do NOT analyze, count, verify, or draft rows inside your internal "
                         "reasoning/thinking! Keep internal thinking under 1 short sentence and write all output directly in content.]"
                     )
-                    if isinstance(last_m.get("content"), str) and "CRITICAL STREAMING DIRECTIVE" not in last_m["content"]:
+                    marker = "CRITICAL TOOL DIRECTIVE" if tools else "CRITICAL STREAMING DIRECTIVE"
+                    if isinstance(last_m.get("content"), str) and marker not in last_m["content"]:
                         last_m["content"] = last_m["content"] + no_draft_hint
                     elif isinstance(last_m.get("content"), list):
                         new_parts = [dict(p) for p in last_m["content"]]
                         for p in reversed(new_parts):
                             if p.get("type") == "text":
                                 txt_val = str(p.get("text") or "")
-                                if "CRITICAL STREAMING DIRECTIVE" not in txt_val:
+                                if marker not in txt_val:
                                     p["text"] = txt_val + no_draft_hint
                                 break
                         last_m["content"] = new_parts
@@ -254,11 +276,24 @@ class LlmProviderService:
                     gateway_logger.warning(
                         f"Web AI (/openai) HTTP {resp.status} döndü | model={requested_model_id or model_name} | detay={err_body}"
                     )
-                    if resp.status in (402, 429, 500, 502, 503, 504) and retry_idx < 3:
-                        m_wait = re.search(r"Retry after (\d+)s", err_body)
-                        wait_sec = min(int(m_wait.group(1)) + 2, 48) if m_wait else (6 * (retry_idx + 1))
+                    if (
+                        resp.status == 400
+                        and effort is not None
+                        and ("reasoning_effort" in err_body or "unsupported_parameter" in err_body)
+                    ):
                         gateway_logger.info(
-                            f"Web AI (/openai) geçici sınır/hata (HTTP {resp.status}, deneme={retry_idx + 1}/3), {wait_sec}s beklenip tekrar denenecek..."
+                            f"Web AI (/openai) reasoning_effort='{effort}' reddedildi, parametresiz anında yeniden deneniyor..."
+                        )
+                        effort = None
+                        conn.close()
+                        return _execute_single_pollinations_call(
+                            msgs, call_tools_cb, call_delta_cb, seed_offset + 1, retry_idx=retry_idx
+                        )
+                    if resp.status in (402, 429, 500, 502, 503, 504) and retry_idx < 2:
+                        m_wait = re.search(r"Retry after (\d+)s", err_body)
+                        wait_sec = min(int(m_wait.group(1)) + 2, 30) if m_wait else (4 * (retry_idx + 1))
+                        gateway_logger.info(
+                            f"Web AI (/openai) geçici sınır/hata (HTTP {resp.status}, deneme={retry_idx + 1}/2), {wait_sec}s beklenip tekrar denenecek..."
                         )
                         conn.close()
                         time.sleep(wait_sec)
@@ -273,16 +308,31 @@ class LlmProviderService:
                     max_duration_sec=float(settings.web_gateway_timeout_sec),
                     on_tool_calls=call_tools_cb,
                     on_reasoning=on_reasoning if seed_offset == 0 else None,
+                    on_finish_reason=_record_finish,
+                    on_stream_error=_record_stream_error,
                 )
-                if not stream_ok and retry_idx < 3:
-                    gateway_logger.warning(
-                        f"Web AI (/openai) akıştan içerik veya tool_calls çıkmadı (yalnızca reasoning/kesik akış, deneme={retry_idx + 1}/3), yeniden deneniyor..."
-                    )
-                    conn.close()
-                    time.sleep(3 * (retry_idx + 1))
-                    return _execute_single_pollinations_call(
-                        msgs, call_tools_cb, call_delta_cb, seed_offset + 13, retry_idx=retry_idx + 1
-                    )
+                if not stream_ok:
+                    err_hint = last_stream_error[-1].lower()
+                    if effort is not None and (
+                        "reasoning_effort" in err_hint or "unsupported_parameter" in err_hint
+                    ):
+                        gateway_logger.info(
+                            f"Web AI (/openai) akış içi hata nedeniyle reasoning_effort='{effort}' kaldırılıp yeniden deneniyor..."
+                        )
+                        effort = None
+                        conn.close()
+                        return _execute_single_pollinations_call(
+                            msgs, call_tools_cb, call_delta_cb, seed_offset + 3, retry_idx=retry_idx
+                        )
+                    if retry_idx < 2:
+                        gateway_logger.warning(
+                            f"Web AI (/openai) akıştan içerik veya tool_calls çıkmadı (deneme={retry_idx + 1}/2, hata='{last_stream_error[-1][:160] or '-'}'), yeniden deneniyor..."
+                        )
+                        conn.close()
+                        time.sleep(2 * (retry_idx + 1))
+                        return _execute_single_pollinations_call(
+                            msgs, call_tools_cb, call_delta_cb, seed_offset + 13, retry_idx=retry_idx + 1
+                        )
                 return stream_ok
             except Exception as exc:
                 elapsed_err = int((time.perf_counter() - t0) * 1000)
@@ -302,7 +352,8 @@ class LlmProviderService:
         ok = _execute_single_pollinations_call(openai_messages, on_tool_calls, on_delta)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         gateway_logger.info(
-            f"Web AI (/openai) akışı tamamlandı | istem={requested_model_id} | upstream={model_name} | ok={ok} | süre={elapsed_ms}ms"
+            f"Web AI (/openai) akışı tamamlandı | istem={requested_model_id} | upstream={model_name} "
+            f"| effort={effort} | finish_reason={captured_finish_reason[-1]} | ok={ok} | süre={elapsed_ms}ms"
         )
         return ok
 
@@ -313,6 +364,7 @@ class LlmProviderService:
         on_delta: Callable[[str], None],
         requested_model_id: str = "",
         response_format: Optional[Dict[str, Any]] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """Yedek olarak text.pollinations.ai/ kök POST uç noktasından yanıt okur."""
         t0 = time.perf_counter()
@@ -353,6 +405,8 @@ class LlmProviderService:
             if not raw_body:
                 return False
             on_delta(raw_body)
+            if on_finish_reason:
+                on_finish_reason("stop")
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             gateway_logger.info(
                 f"Web AI (root /) yanıtı alındı | istem={requested_model_id} | süre={elapsed_ms}ms"
@@ -498,6 +552,8 @@ class LlmProviderService:
         max_duration_sec: float = 90.0,
         on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_stream_error: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
         HTTP yanıtını 'resp.readline()' üzerinden (HTTP chunked transfer encoding
@@ -513,9 +569,13 @@ class LlmProviderService:
         non_sse_lines: List[str] = []
         reasoning_buffer: List[str] = []
         streamed_tool_calls_by_idx: Dict[int, Dict[str, Any]] = {}
+        last_finish_reason: Optional[str] = None
+        saw_done = False
+        timed_out = False
 
         while True:
             if (time.perf_counter() - t_start) > max_duration_sec:
+                timed_out = True
                 gateway_logger.warning(
                     f"SSE okuma üst zaman aşımı ({max_duration_sec}s) aşıldı, akış kesiliyor."
                 )
@@ -532,10 +592,24 @@ class LlmProviderService:
             if line.startswith("data:"):
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     chunk = json.loads(data_str)
+                    if isinstance(chunk, dict) and chunk.get("error") and not chunk.get("choices"):
+                        err_info = (
+                            json.dumps(chunk["error"], ensure_ascii=False)
+                            if isinstance(chunk["error"], (dict, list))
+                            else str(chunk["error"])
+                        )
+                        gateway_logger.warning(f"Web AI SSE içi hata döndü: {err_info[:400]}")
+                        if on_stream_error:
+                            on_stream_error(err_info)
+                        break
                     choice0 = chunk.get("choices", [{}])[0] if chunk.get("choices") else {}
+                    fr_val = choice0.get("finish_reason")
+                    if fr_val:
+                        last_finish_reason = str(fr_val)
                     delta_obj = choice0.get("delta") or choice0.get("message") or {}
 
                     reasoning_piece = (
@@ -600,13 +674,34 @@ class LlmProviderService:
             on_tool_calls(ordered_tcs)
 
         if received_content:
+            if timed_out or last_finish_reason in ("length", "max_tokens"):
+                effective_finish = "length"
+            elif last_finish_reason is None and not saw_done:
+                effective_finish = "length"
+            else:
+                effective_finish = last_finish_reason or (
+                    "tool_calls" if streamed_tool_calls_by_idx else "stop"
+                )
+            if on_finish_reason:
+                on_finish_reason(effective_finish)
             return True
 
         if non_sse_lines:
             joined = "\n".join(non_sse_lines).strip()
             try:
                 parsed = json.loads(joined)
+                if isinstance(parsed, dict) and parsed.get("error") and not parsed.get("choices"):
+                    err_info = (
+                        json.dumps(parsed["error"], ensure_ascii=False)
+                        if isinstance(parsed["error"], (dict, list))
+                        else str(parsed["error"])
+                    )
+                    gateway_logger.warning(f"Web AI JSON gövde hatası döndü: {err_info[:400]}")
+                    if on_stream_error:
+                        on_stream_error(err_info)
+                    return False
                 choice = parsed.get("choices", [{}])[0] if parsed.get("choices") else {}
+                fr_json = choice.get("finish_reason")
                 msg_obj = choice.get("message") or choice.get("delta") or {}
                 got_content_or_tools = False
 
@@ -632,11 +727,28 @@ class LlmProviderService:
                     got_content_or_tools = True
 
                 if got_content_or_tools:
+                    effective_json_finish = (
+                        "length"
+                        if fr_json in ("length", "max_tokens")
+                        else (str(fr_json) if fr_json else ("tool_calls" if tool_calls else "stop"))
+                    )
+                    if on_finish_reason:
+                        on_finish_reason(effective_json_finish)
                     return True
             except Exception:
                 if len(joined) > 0 and not joined.startswith("<"):
                     on_delta(joined)
+                    if on_finish_reason:
+                        on_finish_reason("stop")
                     return True
+
+        if received_reasoning:
+            r_len = sum(len(x) for x in reasoning_buffer)
+            gateway_logger.warning(
+                f"Web AI yalnızca reasoning üretti (content boş) | reasoning_krk={r_len} | finish_reason={last_finish_reason}"
+            )
+            if on_stream_error:
+                on_stream_error(f"reasoning_only({r_len}_chars,finish={last_finish_reason})")
 
         # Eğer yalnızca reasoning alındıysa ama asıl yanıt (content veya tool_calls) hiç gelmediyse
         # False döndür ki üst katman yeniden denesin veya yedek (fallback) uç noktadan tam yanıtı çeksin.

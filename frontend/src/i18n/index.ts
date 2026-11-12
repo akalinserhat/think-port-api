@@ -1,11 +1,35 @@
+/**
+ * ThinkPort API - Çok Dilli (i18n) Sözlük ve Başlatma Modülü (i18n/index.ts)
+ * Türkçe (tr) ve İngilizce (en) dil kaynaklarını ve @akalin/* modül çevirilerini birleştirir.
+ */
+
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import { GLOBAL_SEARCH_LOCALES } from '@akalin/global_search_module';
+import { USER_AUTH_LOGIN_TRANSLATIONS } from '@akalin/user_auth_module';
 
 const resources = {
   tr: {
     translation: {
       ...GLOBAL_SEARCH_LOCALES.tr,
+      ...USER_AUTH_LOGIN_TRANSLATIONS.tr,
+      login: {
+        title: 'ThinkPort API',
+        subtitle:
+          'Admin Yönetim Paneline devam etmek için sistem kullanıcısı bilgilerinizle giriş yapın.',
+        submit: 'Admin Panele Giriş Yap',
+        submitting: 'Giriş Yapılıyor...',
+        email_label: 'E-posta Adresi',
+        password_label: 'Şifre',
+        forgot_password: 'Şifremi Unuttum (E-posta ile Sıfırla)',
+        agent_panel_title: 'Serhat Akalın (Varsayılan Yönetici)',
+        agent_ready: 'Hazır',
+        agent_quick_login: 'Hızlı Giriş Yap',
+        agent_fill_form: 'Forma Doldur',
+        error_generic: 'Giriş yapılamadı.',
+        footer_note:
+          'Sistem Kullanıcıları yalnızca yetkili yöneticiler tarafından /settings/users üzerinden yönetilir.'
+      },
       brand: {
         title: 'ThinkPort API',
         subtitle: 'MD3 Yönetim & AI Stüdyosu',
@@ -408,6 +432,23 @@ const resources = {
   en: {
     translation: {
       ...GLOBAL_SEARCH_LOCALES.en,
+      ...USER_AUTH_LOGIN_TRANSLATIONS.en,
+      login: {
+        title: 'ThinkPort API',
+        subtitle: 'Sign in with your system user credentials to access the Admin Control Panel.',
+        submit: 'Sign In to Admin Panel',
+        submitting: 'Signing In...',
+        email_label: 'Email Address',
+        password_label: 'Password',
+        forgot_password: 'Forgot Password (Reset via Email)',
+        agent_panel_title: 'Serhat Akalın (Default Admin)',
+        agent_ready: 'Ready',
+        agent_quick_login: 'Quick Sign In',
+        agent_fill_form: 'Fill Form',
+        error_generic: 'Unable to sign in.',
+        footer_note:
+          'System Users are managed exclusively by authorized administrators via /settings/users.'
+      },
       brand: {
         title: 'ThinkPort API',
         subtitle: 'MD3 Admin & AI Studio',

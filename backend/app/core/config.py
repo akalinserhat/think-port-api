@@ -43,6 +43,9 @@ class AppConfig:
     postgres_user: str = os.getenv("POSTGRES_USER", "gateway")
     postgres_password: str = os.getenv("POSTGRES_PASSWORD", "gateway_secret_password")
     postgres_db: str = os.getenv("POSTGRES_DB", "thinkport_db")
+    webakus_postgres_user: str = os.getenv("WEBAKUS_POSTGRES_USER", "postgres")
+    webakus_postgres_password: str = os.getenv("WEBAKUS_POSTGRES_PASSWORD", "postgres")
+    webakus_postgres_db: str = os.getenv("WEBAKUS_POSTGRES_DB", "webakus_db")
 
 
 settings = AppConfig()

@@ -19,12 +19,18 @@ try:
     PG_USER: str = settings.postgres_user
     PG_PASSWORD: str = settings.postgres_password
     PG_DB: str = settings.postgres_db
+    PG_RAG_USER: str = getattr(settings, "webakus_postgres_user", "postgres")
+    PG_RAG_PASSWORD: str = getattr(settings, "webakus_postgres_password", "postgres")
+    PG_RAG_DB: str = getattr(settings, "webakus_postgres_db", "webakus_db")
 except Exception:
     PG_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
     PG_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
     PG_USER = os.getenv("POSTGRES_USER", "gateway")
     PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "gateway_secret_password")
     PG_DB = os.getenv("POSTGRES_DB", "thinkport_db")
+    PG_RAG_USER = os.getenv("WEBAKUS_POSTGRES_USER", "postgres")
+    PG_RAG_PASSWORD = os.getenv("WEBAKUS_POSTGRES_PASSWORD", "postgres")
+    PG_RAG_DB = os.getenv("WEBAKUS_POSTGRES_DB", "webakus_db")
 
 try:
     from app.repositories.postgres_driver import PgWireConnection
@@ -329,26 +335,6 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-CREATE TABLE IF NOT EXISTS rag_document_chunks (
-    id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
-    message_id TEXT,
-    file_name TEXT NOT NULL,
-    page_number INTEGER NOT NULL DEFAULT 1,
-    chunk_index INTEGER NOT NULL DEFAULT 0,
-    content TEXT NOT NULL,
-    token_count INTEGER NOT NULL DEFAULT 0,
-    embedding vector(384),
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_rag_chunks_conv_order
-    ON rag_document_chunks(conversation_id, file_name, chunk_index ASC);
-
-CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_hnsw
-    ON rag_document_chunks USING hnsw (embedding vector_cosine_ops);
-
 CREATE TABLE IF NOT EXISTS rag_session_memory (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
@@ -399,12 +385,76 @@ CREATE INDEX IF NOT EXISTS idx_agent_memories_content_trgm
     ON agent_memories USING gin (content gin_trgm_ops);
 """
 
+WEBAKUS_RAG_SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS rag_cloud_documents (
+    id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL DEFAULT 'WEBAKUS_ERP',
+    firma_id INTEGER NOT NULL DEFAULT 0,
+    user_id TEXT NOT NULL DEFAULT '',
+    bulut_dosya_id INTEGER NOT NULL DEFAULT 0,
+    cloud_file_id TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT 'google',
+    belge_turu TEXT NOT NULL DEFAULT 'Genel',
+    belge_id INTEGER NOT NULL DEFAULT 0,
+    belge_no TEXT NOT NULL DEFAULT '',
+    file_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT '',
+    page_count INTEGER NOT NULL DEFAULT 1,
+    total_chunks INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    char_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'indexed',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_cloud_docs_lookup
+    ON rag_cloud_documents(app_id, firma_id, bulut_dosya_id);
+
+CREATE INDEX IF NOT EXISTS idx_rag_cloud_docs_cloud_id
+    ON rag_cloud_documents(cloud_file_id);
+
+CREATE TABLE IF NOT EXISTS rag_document_chunks (
+    id TEXT PRIMARY KEY,
+    cloud_doc_id TEXT REFERENCES rag_cloud_documents(id) ON DELETE CASCADE,
+    app_id TEXT NOT NULL DEFAULT 'WEBAKUS_ERP',
+    firma_id INTEGER NOT NULL DEFAULT 0,
+    bulut_dosya_id INTEGER NOT NULL DEFAULT 0,
+    cloud_file_id TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT,
+    file_name TEXT NOT NULL,
+    section_title TEXT NOT NULL DEFAULT '',
+    page_number INTEGER NOT NULL DEFAULT 1,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    embedding vector(384),
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_conv_order
+    ON rag_document_chunks(conversation_id, file_name, chunk_index ASC);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_hnsw
+    ON rag_document_chunks USING hnsw (embedding vector_cosine_ops);
+"""
+
 
 class PostgresDatabaseManager:
     """
     PostgreSQL (pgvector) birincil veritabanı bağlantı, şema oluşturma (DDL) ve
     başlangıç (seed) yöneticisi.
     Tüm kullanıcılar (Sistem Yöneticileri + API/Kota Kullanıcıları) tek bir `users` tablosunda tutulur.
+    Bulut belge RAG tabloları (`rag_cloud_documents` ve `rag_document_chunks`) ise doğrudan
+    `webakus_db` veritabanında yönetilir.
     """
 
     def __init__(self) -> None:
@@ -427,6 +477,27 @@ class PostgresDatabaseManager:
             timeout=30.0,
         )
 
+    def _open_rag_pg_connection(self) -> PgWireConnection:
+        """Bulut RAG tablolarının (`rag_cloud_documents`, `rag_document_chunks`) bulunduğu `webakus_db` bağlantısını açar."""
+        try:
+            return PgWireConnection(
+                host=PG_HOST,
+                port=PG_PORT,
+                user=PG_RAG_USER,
+                password=PG_RAG_PASSWORD,
+                database=PG_RAG_DB,
+                timeout=30.0,
+            )
+        except Exception:
+            return PgWireConnection(
+                host=PG_HOST,
+                port=PG_PORT,
+                user=PG_USER,
+                password=PG_PASSWORD,
+                database=PG_RAG_DB,
+                timeout=30.0,
+            )
+
     @contextmanager
     def connection(self) -> Iterator[PgWireConnection]:
         """Thread-safe PostgreSQL (thinkport_db) bağlantı bağlamı döner."""
@@ -443,8 +514,23 @@ class PostgresDatabaseManager:
             finally:
                 pg_conn.close()
 
+    @contextmanager
+    def rag_connection(self) -> Iterator[PgWireConnection]:
+        """Thread-safe PostgreSQL (`webakus_db` RAG tabloları) bağlantı bağlamı döner."""
+        with self._lock:
+            pg_conn = self._open_rag_pg_connection()
+            try:
+                pg_conn.begin()
+                yield pg_conn
+                pg_conn.commit()
+            except Exception:
+                pg_conn.rollback()
+                raise
+            finally:
+                pg_conn.close()
+
     def _initialize_database(self) -> None:
-        """Tabloları, pgvector RAG şemasını ve başlangıç verilerini oluşturur."""
+        """Tabloları, `webakus_db` pgvector RAG şemasını ve başlangıç verilerini oluşturur."""
         with self.connection() as conn:
             conn.executescript(SCHEMA_SQL)
             conn.executescript(PG_VECTOR_RAG_SCHEMA_SQL)
@@ -457,18 +543,205 @@ class PostgresDatabaseManager:
             self._seed_default_roles_and_smtp_if_empty(conn)
             self._seed_default_protocols_if_empty(conn)
             self._seed_default_agents_if_empty(conn)
-            try:
-                from app.core.logger import gateway_logger
+
+        with self.rag_connection() as rag_conn:
+            rag_conn.executescript(WEBAKUS_RAG_SCHEMA_SQL)
+            self._migrate_rag_cloud_columns(rag_conn)
+
+        self._migrate_rag_tables_from_thinkport_to_webakus()
+
+        try:
+            from app.core.logger import gateway_logger
+            with self.connection() as conn:
                 conv_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_conversations").fetchone()["c"]
                 msg_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_messages").fetchone()["c"]
                 att_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_message_attachments").fetchone()["c"]
                 ulog_cnt = conn.execute("SELECT COUNT(1) AS c FROM usage_logs").fetchone()["c"]
                 usr_cnt = conn.execute("SELECT COUNT(1) AS c FROM users").fetchone()["c"]
-                gateway_logger.info(
-                    f"PostgreSQL (pgvector) '{PG_DB}' aktif | users={usr_cnt} | conversations={conv_cnt} | messages={msg_cnt} | attachments={att_cnt} | usage_logs={ulog_cnt}"
+            with self.rag_connection() as rag_conn:
+                rag_doc_cnt = rag_conn.execute("SELECT COUNT(1) AS c FROM rag_cloud_documents").fetchone()["c"]
+                rag_chk_cnt = rag_conn.execute("SELECT COUNT(1) AS c FROM rag_document_chunks").fetchone()["c"]
+            gateway_logger.info(
+                f"PostgreSQL (pgvector) '{PG_DB}' & RAG '{PG_RAG_DB}' aktif | users={usr_cnt} | conversations={conv_cnt} | messages={msg_cnt} | attachments={att_cnt} | webakus_rag_docs={rag_doc_cnt} | webakus_rag_chunks={rag_chk_cnt} | usage_logs={ulog_cnt}"
+            )
+        except Exception:
+            pass
+
+    def _migrate_rag_tables_from_thinkport_to_webakus(self) -> None:
+        """
+        Eğer `thinkport_db` içerisinde eski `rag_cloud_documents` veya `rag_document_chunks`
+        tabloları varsa, tüm verilerini `webakus_db` içerisine aktarır ve `thinkport_db`
+        içerisindeki bu iki tabloyu kaldırır.
+        """
+        old_docs: List[Any] = []
+        old_chunks: List[Any] = []
+        has_old_tables = False
+
+        with self.connection() as tp_conn:
+            tbl_rows = tp_conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name IN ('rag_cloud_documents', 'rag_document_chunks')
+                """
+            ).fetchall()
+            found_tables = {r["table_name"] for r in tbl_rows}
+            if found_tables:
+                has_old_tables = True
+                if "rag_cloud_documents" in found_tables:
+                    old_docs = tp_conn.execute(
+                        """
+                        SELECT id, app_id, firma_id, user_id, bulut_dosya_id, cloud_file_id,
+                               provider, belge_turu, belge_id, belge_no, file_name, mime_type,
+                               file_size, content_hash, page_count, total_chunks, total_tokens,
+                               char_count, status, created_at, updated_at
+                        FROM rag_cloud_documents
+                        """
+                    ).fetchall()
+                if "rag_document_chunks" in found_tables:
+                    old_chunks = tp_conn.execute(
+                        """
+                        SELECT id, cloud_doc_id, app_id, firma_id, bulut_dosya_id, cloud_file_id,
+                               conversation_id, message_id, file_name, section_title,
+                               page_number, chunk_index, content, token_count,
+                               embedding::text AS embedding_str, metadata_json, created_at
+                        FROM rag_document_chunks
+                        """
+                    ).fetchall()
+
+        if not has_old_tables:
+            return
+
+        with self.rag_connection() as rag_conn:
+            for d in old_docs:
+                rag_conn.execute(
+                    """
+                    INSERT OR IGNORE INTO rag_cloud_documents (
+                        id, app_id, firma_id, user_id, bulut_dosya_id, cloud_file_id,
+                        provider, belge_turu, belge_id, belge_no, file_name, mime_type,
+                        file_size, content_hash, page_count, total_chunks, total_tokens,
+                        char_count, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        d["id"],
+                        d["app_id"],
+                        d["firma_id"],
+                        d["user_id"],
+                        d["bulut_dosya_id"],
+                        d["cloud_file_id"],
+                        d["provider"],
+                        d["belge_turu"],
+                        d["belge_id"],
+                        d["belge_no"],
+                        d["file_name"],
+                        d["mime_type"],
+                        d["file_size"],
+                        d["content_hash"],
+                        d["page_count"],
+                        d["total_chunks"],
+                        d["total_tokens"],
+                        d["char_count"],
+                        d["status"],
+                        d["created_at"],
+                        d["updated_at"],
+                    ),
                 )
-            except Exception:
-                pass
+
+            for c in old_chunks:
+                rag_conn.execute(
+                    """
+                    INSERT OR IGNORE INTO rag_document_chunks (
+                        id, cloud_doc_id, app_id, firma_id, bulut_dosya_id, cloud_file_id,
+                        conversation_id, message_id, file_name, section_title,
+                        page_number, chunk_index, content, token_count,
+                        embedding, metadata_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        c["id"],
+                        c["cloud_doc_id"],
+                        c["app_id"],
+                        c["firma_id"],
+                        c["bulut_dosya_id"],
+                        c["cloud_file_id"],
+                        c["conversation_id"] or "",
+                        c["message_id"],
+                        c["file_name"],
+                        c["section_title"] or "",
+                        c["page_number"],
+                        c["chunk_index"],
+                        c["content"],
+                        c["token_count"],
+                        c["embedding_str"],
+                        c["metadata_json"] or "{}",
+                        c["created_at"],
+                    ),
+                )
+
+        with self.connection() as tp_conn:
+            tp_conn.execute("DROP TABLE IF EXISTS rag_document_chunks CASCADE")
+            tp_conn.execute("DROP TABLE IF EXISTS rag_cloud_documents CASCADE")
+
+    @staticmethod
+    def _migrate_rag_cloud_columns(conn: PgWireConnection) -> None:
+        """
+        `webakus_db` üzerindeki `rag_document_chunks` ve `rag_cloud_documents` tablolarının
+        sütun ve indeks şemasını doğrular; `rag_cloud_documents` üzerinde eski tek-parça
+        `full_text` sütunu varsa kaldırır.
+        """
+        doc_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(rag_cloud_documents)").fetchall()
+        }
+        if "full_text" in doc_cols:
+            conn.execute("ALTER TABLE rag_cloud_documents DROP COLUMN IF EXISTS full_text")
+
+        chunk_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(rag_document_chunks)").fetchall()
+        }
+        if "cloud_doc_id" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN cloud_doc_id TEXT REFERENCES rag_cloud_documents(id) ON DELETE CASCADE"
+            )
+        if "app_id" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN app_id TEXT NOT NULL DEFAULT 'WEBAKUS_ERP'"
+            )
+        if "firma_id" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN firma_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "bulut_dosya_id" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN bulut_dosya_id INTEGER NOT NULL DEFAULT 0"
+            )
+        if "cloud_file_id" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN cloud_file_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "section_title" not in chunk_cols:
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ADD COLUMN section_title TEXT NOT NULL DEFAULT ''"
+            )
+
+        conn.execute(
+            "ALTER TABLE rag_document_chunks DROP CONSTRAINT IF EXISTS rag_document_chunks_conversation_id_fkey"
+        )
+        conn.execute(
+            "ALTER TABLE rag_document_chunks ALTER COLUMN conversation_id SET DEFAULT ''"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_chunks_cloud_doc ON rag_document_chunks(cloud_doc_id, chunk_index ASC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_chunks_bulut_id ON rag_document_chunks(bulut_dosya_id, chunk_index ASC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_chunks_content_trgm ON rag_document_chunks USING gin (content gin_trgm_ops)"
+        )
 
     @staticmethod
     def _migrate_agent_and_memory_columns(conn: PgWireConnection) -> None:

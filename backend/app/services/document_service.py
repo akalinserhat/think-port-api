@@ -1,3 +1,8 @@
+"""
+ThinkPort AI Gateway - Belge Çözümleme, Metin Çıkarımı ve Token Tahminleme Servisi (document_service.py).
+PDF, Word (DOC/DOCX), Excel (XLS/XLSX), PowerPoint (PPTX), RTF ve düz metin belgelerinden
+yapılandırılmış metin ve tablo çıkarımını gerçekleştirir.
+"""
 import base64
 import io
 import os
@@ -17,7 +22,7 @@ from app.dtos.document_dto import ParseFileRequestDTO, ParseFileResponseDTO
 class DocumentService:
     """
     Belge çözümleme ve token tahminleme servisi.
-    Office (DOCX/XLSX/PPTX), PDF ve düz metin/kod dosyalarından metin ve tablo çıkarımını
+    Office (DOC/DOCX/XLSX/PPTX), PDF ve düz metin/kod dosyalarından metin ve tablo çıkarımını
     yapılandırılmış olarak gerçekleştirir.
     """
 
@@ -42,13 +47,18 @@ class DocumentService:
 
     def extract_text_from_bytes(self, filename: str, raw_bytes: bytes) -> str:
         """Dosya uzantısına göre uygun metin çıkarıcıyı çalıştırır."""
-        lower_name = filename.lower()
+        lower_name = (filename or "").lower()
         if lower_name.endswith(".docx"):
             docx_text = self._extract_docx_structured(raw_bytes)
             if docx_text:
                 return docx_text[: settings.max_extracted_document_chars]
 
-        if lower_name.endswith(".xlsx"):
+        if lower_name.endswith((".doc", ".rtf")):
+            doc_text = self._extract_doc_or_rtf(raw_bytes, lower_name)
+            if doc_text:
+                return doc_text[: settings.max_extracted_document_chars]
+
+        if lower_name.endswith((".xlsx", ".xls")):
             xlsx_text = self._extract_xlsx_structured(raw_bytes)
             if xlsx_text:
                 return xlsx_text[: settings.max_extracted_document_chars]
@@ -63,6 +73,67 @@ class DocumentService:
             return pdf_text[: settings.max_extracted_document_chars]
 
         return self._decode_plain_text(raw_bytes)[: settings.max_extracted_document_chars]
+
+    @classmethod
+    def _extract_doc_or_rtf(cls, raw_bytes: bytes, lower_name: str) -> str:
+        """
+        Klasik Word (.doc) veya RTF (.rtf) belgelerinden yapılandırılmış metin çıkarır.
+        1) Eğer dosya ZIP/DOCX yapısındaysa doğrudan DOCX çıkarıcıyı çalıştırır.
+        2) macOS ortamında `/usr/bin/textutil -convert txt -stdout` kullanır.
+        3) Yedek olarak OLE2 / UTF-16LE / CP1254 okunabilir metin bloklarını ayıklar.
+        """
+        if raw_bytes[:4] == b"PK\x03\x04":
+            docx_fallback = cls._extract_docx_structured(raw_bytes)
+            if docx_fallback:
+                return docx_fallback
+
+        if sys.platform == "darwin" and os.path.exists("/usr/bin/textutil"):
+            suffix = ".rtf" if lower_name.endswith(".rtf") else ".doc"
+            tmp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp.write(raw_bytes)
+                    tmp_path = tmp.name
+                proc = subprocess.run(
+                    ["/usr/bin/textutil", "-convert", "txt", "-stdout", tmp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                pass
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+
+        # Yedek: UTF-16LE ve CP1254 okunabilir metin bloklarını çıkar
+        chunks: List[str] = []
+        try:
+            utf16_text = raw_bytes.decode("utf-16-le", errors="ignore")
+            for match in re.findall(r"[A-Za-z0-9ÇĞİÖŞÜçğıöşü.,:;!?'\"()/\-\s]{12,}", utf16_text):
+                cleaned = re.sub(r"\s+", " ", match).strip()
+                if len(cleaned) >= 12 and any(c.isalpha() for c in cleaned):
+                    chunks.append(cleaned)
+        except Exception:
+            pass
+
+        if not chunks:
+            try:
+                cp_text = raw_bytes.decode("cp1254", errors="ignore")
+                for match in re.findall(r"[A-Za-z0-9ÇĞİÖŞÜçğıöşü.,:;!?'\"()/\-\s]{16,}", cp_text):
+                    cleaned = re.sub(r"\s+", " ", match).strip()
+                    if len(cleaned) >= 16 and any(c.isalpha() for c in cleaned):
+                        chunks.append(cleaned)
+            except Exception:
+                pass
+
+        return "\n".join(chunks).strip()
 
     @staticmethod
     def _strip_data_url_header(base64_data: str) -> str:
