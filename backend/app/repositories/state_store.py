@@ -32,13 +32,24 @@ class InMemoryStateStore:
         self._seed_proxies()
 
     def _seed_default_settings(self) -> None:
-        """Varsayılan sistem ayarlarını yükler."""
+        """Varsayılan sistem ve BAAI/bge-m3 RAG embedding ayarlarını yükler."""
+        from app.core.config import settings as app_cfg
+
         self.settings = {
             "global_rpm": 600,
             "max_concurrent_browsers": 16,
             "keep_alive_interval_sec": 300,
             "enable_stealth": True,
             "auto_rotate_proxy_on_403": True,
+            "embedding_primary_provider": "auto",
+            "embedding_model": app_cfg.embedding_model_id,
+            "enable_semantic_chunking": app_cfg.rag_semantic_chunking,
+            "siliconflow_api_key": app_cfg.siliconflow_api_key,
+            "hf_api_key": app_cfg.hf_api_key,
+            "cloudflare_account_id": app_cfg.cloudflare_account_id,
+            "cloudflare_api_token": app_cfg.cloudflare_api_token,
+            "openrouter_api_key": app_cfg.openrouter_api_key,
+            "deepinfra_api_key": app_cfg.deepinfra_api_key,
         }
 
     def _seed_users(self) -> None:

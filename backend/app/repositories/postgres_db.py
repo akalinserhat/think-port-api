@@ -328,6 +328,12 @@ CREATE TABLE IF NOT EXISTS ai_agents (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 PG_VECTOR_RAG_SCHEMA_SQL = """
@@ -409,6 +415,8 @@ CREATE TABLE IF NOT EXISTS rag_cloud_documents (
     total_chunks INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
     char_count INTEGER NOT NULL DEFAULT 0,
+    embedding_model TEXT NOT NULL DEFAULT 'BAAI/bge-m3',
+    embedding_provider TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'indexed',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -435,7 +443,7 @@ CREATE TABLE IF NOT EXISTS rag_document_chunks (
     chunk_index INTEGER NOT NULL DEFAULT 0,
     content TEXT NOT NULL,
     token_count INTEGER NOT NULL DEFAULT 0,
-    embedding vector(384),
+    embedding vector(1024),
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
@@ -674,7 +682,11 @@ class PostgresDatabaseManager:
                         c["chunk_index"],
                         c["content"],
                         c["token_count"],
-                        c["embedding_str"],
+                        (
+                            c["embedding_str"]
+                            if c["embedding_str"] and str(c["embedding_str"]).count(",") == 1023
+                            else None
+                        ),
                         c["metadata_json"] or "{}",
                         c["created_at"],
                     ),
@@ -688,8 +700,8 @@ class PostgresDatabaseManager:
     def _migrate_rag_cloud_columns(conn: PgWireConnection) -> None:
         """
         `webakus_db` üzerindeki `rag_document_chunks` ve `rag_cloud_documents` tablolarının
-        sütun ve indeks şemasını doğrular; `rag_cloud_documents` üzerinde eski tek-parça
-        `full_text` sütunu varsa kaldırır.
+        sütun ve indeks şemasını doğrular; `embedding` sütununu `BAAI/bge-m3` standart
+        `vector(1024)` boyutuna yükseltir ve `full_text` gibi eski sütunları kaldırır.
         """
         doc_cols = {
             row["name"]
@@ -697,6 +709,14 @@ class PostgresDatabaseManager:
         }
         if "full_text" in doc_cols:
             conn.execute("ALTER TABLE rag_cloud_documents DROP COLUMN IF EXISTS full_text")
+        if "embedding_model" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN embedding_model TEXT NOT NULL DEFAULT 'BAAI/bge-m3'"
+            )
+        if "embedding_provider" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''"
+            )
 
         chunk_cols = {
             row["name"]
@@ -725,6 +745,29 @@ class PostgresDatabaseManager:
         if "section_title" not in chunk_cols:
             conn.execute(
                 "ALTER TABLE rag_document_chunks ADD COLUMN section_title TEXT NOT NULL DEFAULT ''"
+            )
+
+        # Mevcut embedding sütunu vector(384) ise BAAI/bge-m3 standart vector(1024) boyutuna yükselt
+        vec_type_row = conn.execute(
+            """
+            SELECT format_type(a.atttypid, a.atttypmod) AS col_type
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = 'rag_document_chunks'
+              AND a.attname = 'embedding'
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """
+        ).fetchone()
+        if vec_type_row and vec_type_row["col_type"] and vec_type_row["col_type"] != "vector(1024)":
+            conn.execute("DROP INDEX IF EXISTS idx_rag_chunks_embedding_hnsw")
+            conn.execute(
+                "ALTER TABLE rag_document_chunks ALTER COLUMN embedding TYPE vector(1024) USING NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_hnsw ON rag_document_chunks USING hnsw (embedding vector_cosine_ops)"
             )
 
         conn.execute(

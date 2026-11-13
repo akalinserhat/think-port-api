@@ -18,6 +18,7 @@ import { Flux3dModel, flux3dModel } from './Flux3dModel';
 import { SdxlTurboModel, sdxlTurboModel } from './SdxlTurboModel';
 import { Qwen25LocalModel, qwen25LocalModel } from './Qwen25LocalModel';
 import { Gemma4LocalModel, gemma4LocalModel } from './Gemma4LocalModel';
+import { BgeM3EmbeddingModel, bgeM3EmbeddingModel } from './BgeM3EmbeddingModel';
 import { DynamicOllamaModelAdapter } from './DynamicOllamaModelAdapter';
 import { CustomModelAdapter } from './CustomModelAdapter';
 
@@ -44,6 +45,8 @@ export {
   qwen25LocalModel,
   Gemma4LocalModel,
   gemma4LocalModel,
+  BgeM3EmbeddingModel,
+  bgeM3EmbeddingModel,
   DynamicOllamaModelAdapter,
   CustomModelAdapter,
 };
@@ -63,5 +66,6 @@ export const BUILTIN_THINKPORT_MODELS: readonly IThinkPortModel[] = [
   fluxAnimeModel,
   flux3dModel,
   sdxlTurboModel,
+  bgeM3EmbeddingModel,
 ];
 

@@ -10,3 +10,4 @@ export * from './conversationService';
 export * from './roleService';
 export * from './smtpService';
 export * from './protocolService';
+export * from './ragEmbeddingService';

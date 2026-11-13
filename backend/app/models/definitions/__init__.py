@@ -12,6 +12,7 @@ from app.models.definitions.flux_anime_model import FluxAnimeModel
 from app.models.definitions.flux_3d_model import Flux3dModel
 from app.models.definitions.sdxl_turbo_model import SdxlTurboModel
 from app.models.definitions.ollama_local_model import OllamaLocalModel
+from app.models.definitions.bge_m3_model import BgeM3EmbeddingModel
 
 __all__ = [
     "Gpt4oModel",
@@ -24,5 +25,6 @@ __all__ = [
     "Flux3dModel",
     "SdxlTurboModel",
     "OllamaLocalModel",
+    "BgeM3EmbeddingModel",
 ]
 

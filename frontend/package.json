@@ -14,6 +14,7 @@
     "@akalin/email_module": "github:akalinserhat/akalin-email-module#main",
     "@akalin/global_search_module": "github:akalinserhat/akalin-global-search-module#main",
     "@akalin/module_core": "github:akalinserhat/akalin-module-core#main",
+    "@akalin/proxy_module": "github:akalinserhat/akalin-proxy-module#main",
     "@akalin/ui": "github:akalinserhat/akalin-ui#main",
     "@akalin/user_auth_module": "github:akalinserhat/akalin-user-auth-module#main",
     "axios": "^1.7.9",

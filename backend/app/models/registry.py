@@ -18,6 +18,7 @@ from app.models.definitions import (
     FluxAnimeModel,
     Flux3dModel,
     SdxlTurboModel,
+    BgeM3EmbeddingModel,
 )
 
 
@@ -45,11 +46,19 @@ class ThinkPortModelRegistry:
 
     def list_web_models(self) -> List[IThinkPortModel]:
         """Web AI / Sohbet modellerini döner."""
-        return [m for m in self._models.values() if not m.is_image and not m.is_local]
+        return [
+            m
+            for m in self._models.values()
+            if not m.is_image and not m.is_local and m.category == "chat"
+        ]
 
     def list_image_models(self) -> List[IThinkPortModel]:
         """Görsel üretim modellerini döner."""
-        return [m for m in self._models.values() if m.is_image]
+        return [m for m in self._models.values() if m.is_image or m.category == "image"]
+
+    def list_embedding_models(self) -> List[IThinkPortModel]:
+        """RAG / Vektör gömme (embedding) modellerini döner."""
+        return [m for m in self._models.values() if m.category == "embedding"]
 
     def get_web_model_dicts(self) -> List[Dict[str, Any]]:
         """config.WEB_MODEL_DEFINITIONS uyumlu sözlük listesi döner."""
@@ -58,6 +67,10 @@ class ThinkPortModelRegistry:
     def get_image_model_dicts(self) -> List[Dict[str, Any]]:
         """config.IMAGE_MODEL_DEFINITIONS uyumlu sözlük listesi döner."""
         return [m.to_definition_dict() for m in self.list_image_models()]
+
+    def get_embedding_model_dicts(self) -> List[Dict[str, Any]]:
+        """config.EMBEDDING_MODEL_DEFINITIONS uyumlu sözlük listesi döner."""
+        return [m.to_definition_dict() for m in self.list_embedding_models()]
 
     def get_style_modifiers(self) -> Dict[str, str]:
         """Görsel üretim modellerinin stil değiştirici haritasını döner."""
@@ -87,6 +100,7 @@ DEFAULT_REGISTERED_MODELS: List[IThinkPortModel] = [
     FluxAnimeModel(),
     Flux3dModel(),
     SdxlTurboModel(),
+    BgeM3EmbeddingModel(),
 ]
 
 model_registry = ThinkPortModelRegistry()

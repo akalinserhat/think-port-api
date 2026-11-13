@@ -6,6 +6,7 @@ from app.core.config import (
     settings,
     WEB_MODEL_DEFINITIONS,
     IMAGE_MODEL_DEFINITIONS,
+    EMBEDDING_MODEL_DEFINITIONS,
     MODEL_ALIAS_MAP,
 )
 from app.dtos.model_dto import (
@@ -169,18 +170,32 @@ class ModelService:
             )
         return inactive
 
+    def get_embedding_models(self) -> List[ModelDefinitionDTO]:
+        """Kayıtlı online/birleşik RAG embedding modellerini (`BAAI/bge-m3` vb.) döner."""
+        models: List[ModelDefinitionDTO] = []
+        for item in EMBEDDING_MODEL_DEFINITIONS:
+            data = {
+                **item,
+                "type": "embedding",
+                "is_image": False,
+                "available": True,
+            }
+            models.append(ModelDefinitionDTO(**data))
+        return models
+
     def get_full_model_library(
         self,
         include_embeddings: bool = False,
         include_inactive: bool = False,
     ) -> List[ModelDefinitionDTO]:
-        """Yerel, Harici API, Web AI ve Görsel üretim modellerinin birleşik kataloğunu döner."""
+        """Yerel, Harici API, Web AI, Görsel ve (istenirse) Embedding modellerinin birleşik kataloğunu döner."""
         local_models = self.discover_local_ollama_models(include_embeddings=include_embeddings)
         external_models = self.discover_external_api_models()
         web_models = self.get_web_models()
         image_models = self.get_image_models()
+        embedding_models = self.get_embedding_models() if include_embeddings else []
 
-        combined = local_models + external_models + web_models + image_models
+        combined = local_models + external_models + web_models + image_models + embedding_models
         if include_inactive:
             active_local_ids = {m.id for m in local_models}
             combined.extend(self.get_inactive_fallback_local_models(active_local_ids))

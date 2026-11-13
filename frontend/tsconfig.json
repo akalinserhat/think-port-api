@@ -30,6 +30,8 @@
       "@akalin/global-search-module": ["./node_modules/@akalin/global_search_module/src/index.ts"],
       "@akalin/user_auth_module": ["../../akalin-user-auth-module/src/index.ts"],
       "@akalin/user-auth-module": ["../../akalin-user-auth-module/src/index.ts"],
+      "@akalin/proxy_module": ["../../akalin-proxy-module/src/index.ts"],
+      "@akalin/proxy-module": ["../../akalin-proxy-module/src/index.ts"],
       "react": ["./node_modules/@types/react"],
       "react/*": ["./node_modules/@types/react/*"],
       "react-dom": ["./node_modules/@types/react-dom"],

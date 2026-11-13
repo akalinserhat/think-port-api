@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from app.services.embedding_service import embedding_service
 from app.services.rag_document_service import rag_document_service
 
 
@@ -215,5 +216,50 @@ def search_cloud_documents(payload: RagSearchRequestDTO) -> Dict[str, Any]:
         min_score=payload.min_score,
         preserve_table_order=payload.preserve_table_order,
         top_k=payload.top_k,
+    )
+
+
+class RagReindexRequestDTO(BaseModel):
+    """PostgreSQL'deki mevcut RAG chunk kayıtlarını aktif BAAI/bge-m3 sağlayıcısıyla yeniden vektörleştirme isteği."""
+
+    app_id: str = Field(default="WEBAKUS_ERP")
+    firma_id: Optional[int] = Field(default=None)
+    only_fallback: bool = Field(
+        default=False,
+        description="True ise yalnızca fallback veya boş vektörlü parçaları yeniden vektörleştirir",
+    )
+
+
+class RagEmbeddingTestRequestDTO(BaseModel):
+    """Online veya yerel BAAI/bge-m3 sağlayıcı bağlantı testi isteği."""
+
+    provider: Optional[str] = Field(
+        default=None,
+        description="Opsiyonel sağlayıcı adı (siliconflow, cloudflare, huggingface, openrouter, deepinfra, ollama)",
+    )
+
+
+@router.get("/embedding-status")
+def get_rag_embedding_status() -> Dict[str, Any]:
+    """Aktif `BAAI/bge-m3` (1024d) online ve yerel sağlayıcı durum özetini döner."""
+    return embedding_service.get_status_summary()
+
+
+@router.post("/embedding-test")
+def test_rag_embedding_provider(payload: RagEmbeddingTestRequestDTO) -> Dict[str, Any]:
+    """Belirtilen veya otomatik seçilen `BAAI/bge-m3` sağlayıcısını canlı örnek metinle test eder."""
+    return embedding_service.test_connection(provider_override=payload.provider)
+
+
+@router.post("/documents/reindex")
+def reindex_cloud_documents(payload: RagReindexRequestDTO) -> Dict[str, Any]:
+    """
+    Buluttan tekrar dosya indirmeye gerek kalmadan PostgreSQL `rag_document_chunks` içindeki
+    mevcut metinleri `BAAI/bge-m3` (1024d) ile yeniden vektörleştirir.
+    """
+    return rag_document_service.reindex_cloud_documents(
+        app_id=payload.app_id,
+        firma_id=payload.firma_id,
+        only_fallback=payload.only_fallback,
     )
 

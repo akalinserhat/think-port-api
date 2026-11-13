@@ -157,13 +157,22 @@ class RecordUsageInputDTO(BaseModel):
 
 
 class GatewaySettingsDTO(BaseModel):
-    """Sistem genel ayarları DTO'su."""
+    """Sistem genel ayarları ve Online BAAI/bge-m3 RAG Embedding sağlayıcı yapılandırması DTO'su."""
 
     global_rpm: int = 600
     max_concurrent_browsers: int = 16
     keep_alive_interval_sec: int = 300
     enable_stealth: bool = True
     auto_rotate_proxy_on_403: bool = True
+    embedding_primary_provider: str = "auto"
+    embedding_model: str = "BAAI/bge-m3"
+    enable_semantic_chunking: bool = True
+    siliconflow_api_key: str = ""
+    hf_api_key: str = ""
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    openrouter_api_key: str = ""
+    deepinfra_api_key: str = ""
 
 
 class AdminStateResponseDTO(BaseModel):

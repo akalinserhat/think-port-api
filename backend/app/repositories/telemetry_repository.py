@@ -181,18 +181,57 @@ class UsageRepository:
 
 
 class SettingsRepository:
-    """Sistem genel ayarları veri erişim katmanı."""
+    """Sistem genel ayarları ve BAAI/bge-m3 RAG sağlayıcı anahtarları kalıcı veri erişim katmanı."""
 
     def __init__(self, state_store: InMemoryStateStore) -> None:
         self._store = state_store
+        self._loaded_from_db = False
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded_from_db:
+            return
+        try:
+            with sqlite_db.connection() as conn:
+                row = conn.execute(
+                    "SELECT value FROM system_settings WHERE key = ?",
+                    ("gateway_settings",),
+                ).fetchone()
+                if row and row["value"]:
+                    saved = json.loads(row["value"])
+                    if isinstance(saved, dict):
+                        for k, v in saved.items():
+                            # Ortam değişkeninden dolu gelen anahtar varsa boş DB değeriyle ezme
+                            if k.endswith("_api_key") or k.endswith("_api_token") or k == "cloudflare_account_id":
+                                if v or not self._store.settings.get(k):
+                                    self._store.settings[k] = v
+                            else:
+                                self._store.settings[k] = v
+            self._loaded_from_db = True
+        except Exception:
+            pass
 
     def get_settings(self) -> GatewaySettingsDTO:
-        """Mevcut sistem ayarlarını DTO olarak döner."""
+        """Mevcut sistem ayarlarını PostgreSQL kalıcı deposuyla senkronize ederek DTO olarak döner."""
+        self._ensure_loaded()
         return GatewaySettingsDTO(**self._store.settings)
 
     def update_settings(self, updated: GatewaySettingsDTO) -> GatewaySettingsDTO:
-        """Sistem ayarlarını günceller ve yeni durumu döner."""
-        self._store.settings.update(updated.model_dump())
+        """Sistem ayarlarını hem bellekte hem PostgreSQL `system_settings` tablosunda kalıcı günceller."""
+        self._ensure_loaded()
+        dumped = updated.model_dump()
+        self._store.settings.update(dumped)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            with sqlite_db.connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO system_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("gateway_settings", json.dumps(self._store.settings, ensure_ascii=False), now_iso),
+                )
+        except Exception:
+            pass
         return GatewaySettingsDTO(**self._store.settings)
 
 

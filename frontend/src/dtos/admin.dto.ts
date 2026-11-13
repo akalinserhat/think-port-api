@@ -236,6 +236,53 @@ export interface GatewaySettingsDTO {
   keep_alive_interval_sec: number;
   enable_stealth: boolean;
   auto_rotate_proxy_on_403: boolean;
+  embedding_primary_provider?: string;
+  embedding_model?: string;
+  enable_semantic_chunking?: boolean;
+  siliconflow_api_key?: string;
+  hf_api_key?: string;
+  cloudflare_account_id?: string;
+  cloudflare_api_token?: string;
+  openrouter_api_key?: string;
+  deepinfra_api_key?: string;
+}
+
+export interface RagEmbeddingStatusDTO {
+  model: string;
+  dimensions: number;
+  primary_preference: string;
+  semantic_chunking_enabled: boolean;
+  configured_online_providers: string[];
+  local_ollama_bge_m3_ready: boolean;
+  neural_ready: boolean;
+  last_active_provider: string;
+  last_latency_ms?: number | null;
+}
+
+export interface RagEmbeddingTestResponseDTO {
+  ok: boolean;
+  model: string;
+  provider: string;
+  is_neural_bge_m3: boolean;
+  dimensions: number;
+  latency_ms: number;
+  sample_similarity?: number;
+  message: string;
+}
+
+export interface RagReindexResponseDTO {
+  ok?: boolean;
+  status?: string;
+  provider?: string;
+  embedding_provider?: string;
+  model?: string;
+  embedding_model?: string;
+  dimensions?: number;
+  updated_chunks?: number;
+  updated_documents?: number;
+  reindexed_chunks?: number;
+  reindexed_documents?: number;
+  message?: string;
 }
 
 export interface RolePermissionDTO {

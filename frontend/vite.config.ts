@@ -1,8 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
-import net from 'node:net';
-import path from 'node:path';
-import { defineConfig, Plugin } from 'vite';
+import * as fs from 'node:fs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import * as net from 'node:net';
+import * as path from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const OPTIONAL_PEER_STUBS = new Set([
@@ -86,6 +87,29 @@ function runSqliteBridge(payload: Record<string, unknown>): { status: number; bo
     return {
       status: 404,
       body: JSON.stringify({ detail: 'Sohbet oturumu bulunamadı.' }),
+    };
+  }
+  return { status: 200, body: stdout };
+}
+
+function runProxyModuleBridge(payload: Record<string, unknown>): { status: number; body: string } {
+  const bridgeScript = path.resolve(__dirname, '../../akalin-proxy-module/database/proxy_cli_bridge.py');
+  const proc = spawnSync(resolvePythonBin(), [bridgeScript], {
+    input: JSON.stringify(payload),
+    encoding: 'utf-8',
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (proc.status !== 0) {
+    return {
+      status: 500,
+      body: JSON.stringify({ detail: proc.stderr || 'Proxy DB bridge execution error' }),
+    };
+  }
+  const stdout = (proc.stdout || '').trim();
+  if (!stdout || stdout === 'null') {
+    return {
+      status: 404,
+      body: JSON.stringify({ detail: 'Proxy kaydı bulunamadı.' }),
     };
   }
   return { status: 200, body: stdout };
@@ -178,7 +202,7 @@ function optionalPeerStubPlugin(): Plugin {
         return next();
       });
 
-      server.middlewares.use('/admin/conversations', (req, res) => {
+      server.middlewares.use('/admin/conversations', (req, res, next) => {
         const parsedUrl = new URL(req.url || '/', 'http://localhost');
         const subPath = parsedUrl.pathname.replace(/^\/+/, '');
         const authHeader = (req.headers['authorization'] as string) || '';
@@ -325,7 +349,7 @@ function optionalPeerStubPlugin(): Plugin {
 
       server.middlewares.use('/admin/proxies/dashboard', (req, res, next) => {
         if (req.method === 'GET') {
-          const result = runSqliteBridge({ action: 'pool_dashboard' });
+          const result = runProxyModuleBridge({ action: 'pool_dashboard' });
           res.statusCode = result.status;
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.end(result.body);
@@ -343,7 +367,7 @@ function optionalPeerStubPlugin(): Plugin {
             } catch {
               parsedBody = {};
             }
-            const result = runSqliteBridge({
+            const result = runProxyModuleBridge({
               action: 'record_pool_event',
               payload: parsedBody,
             });
@@ -354,6 +378,154 @@ function optionalPeerStubPlugin(): Plugin {
           return;
         }
         next();
+      });
+
+      server.middlewares.use('/admin/proxies', (req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const subPath = parsedUrl.pathname.replace(/^\/+/, '');
+
+        if (req.method === 'GET' && !subPath) {
+          const result = runProxyModuleBridge({ action: 'proxies_list' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'POST' && subPath === 'check-all') {
+          const result = runProxyModuleBridge({ action: 'proxies_check_all' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'POST' && subPath.endsWith('/check')) {
+          const proxyId = decodeURIComponent(subPath.replace(/\/check$/, ''));
+          const result = runProxyModuleBridge({ action: 'proxies_check_one', proxy_id: proxyId });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'PATCH' && subPath.endsWith('/toggle')) {
+          const proxyId = decodeURIComponent(subPath.replace(/\/toggle$/, ''));
+          const result = runProxyModuleBridge({ action: 'proxies_toggle', proxy_id: proxyId });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'DELETE' && subPath) {
+          const proxyId = decodeURIComponent(subPath);
+          const result = runProxyModuleBridge({ action: 'proxies_delete', proxy_id: proxyId });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          let parsedBody: Record<string, unknown> = {};
+          try {
+            parsedBody = JSON.parse(body || '{}');
+          } catch { }
+
+          if (req.method === 'POST' && !subPath) {
+            const result = runProxyModuleBridge({ action: 'proxies_create', body: parsedBody });
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          if (req.method === 'POST' && subPath === 'bulk') {
+            const result = runProxyModuleBridge({ action: 'proxies_bulk_import', body: parsedBody });
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          if (req.method === 'POST' && subPath === 'fetch-free') {
+            const result = runProxyModuleBridge({ action: 'proxies_fetch_free', body: parsedBody });
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ detail: 'Method not allowed' }));
+        });
+      });
+
+      server.middlewares.use('/admin/sessions', (req, res) => {
+        const parsedUrl = new URL(req.url || '/', 'http://localhost');
+        const subPath = parsedUrl.pathname.replace(/^\/+/, '');
+
+        if (req.method === 'GET' && !subPath) {
+          const result = runProxyModuleBridge({ action: 'sessions_list' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'GET' && subPath === 'dashboard') {
+          const result = runProxyModuleBridge({ action: 'pool_dashboard' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'POST' && subPath === 'prune-idle') {
+          const result = runProxyModuleBridge({ action: 'sessions_prune_idle' });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        if (req.method === 'DELETE' && subPath) {
+          const sessionId = decodeURIComponent(subPath);
+          const result = runProxyModuleBridge({ action: 'sessions_terminate', session_id: sessionId });
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(result.body);
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          let parsedBody: Record<string, unknown> = {};
+          try {
+            parsedBody = JSON.parse(body || '{}');
+          } catch { }
+
+          if (req.method === 'POST' && subPath === 'spawn') {
+            const result = runProxyModuleBridge({ action: 'sessions_spawn', body: parsedBody });
+            res.statusCode = result.status;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.end(result.body);
+            return;
+          }
+
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ detail: 'Method not allowed' }));
+        });
       });
 
       server.middlewares.use('/admin/users/auth/login', (req, res, next) => {
@@ -839,7 +1011,7 @@ function optionalPeerStubPlugin(): Plugin {
         });
       });
 
-      const handleAiAgentsMiddleware = (req: any, res: any) => {
+      const handleAiAgentsMiddleware = (req: IncomingMessage, res: ServerResponse) => {
         const parsedUrl = new URL(req.url || '/', 'http://localhost');
         const subPath = parsedUrl.pathname.replace(/^\/+/, '');
 
@@ -884,7 +1056,7 @@ function optionalPeerStubPlugin(): Plugin {
         }
 
         let body = '';
-        req.on('data', (chunk: any) => {
+        req.on('data', (chunk: Buffer | string) => {
           body += chunk;
         });
         req.on('end', () => {
@@ -1198,6 +1370,10 @@ export default defineConfig({
         replacement: path.resolve(__dirname, '../../akalin-user-auth-module/src/index.ts'),
       },
       {
+        find: /^@akalin\/proxy[-_]module$/,
+        replacement: path.resolve(__dirname, '../../akalin-proxy-module/src/index.ts'),
+      },
+      {
         find: 'react/jsx-runtime',
         replacement: path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
       },
@@ -1268,6 +1444,8 @@ export default defineConfig({
       '@akalin/global-search-module',
       '@akalin/user_auth_module',
       '@akalin/user-auth-module',
+      '@akalin/proxy_module',
+      '@akalin/proxy-module',
     ],
     extensions: ['.tsx', '.jsx'],
     include: [

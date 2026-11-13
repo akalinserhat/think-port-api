@@ -359,7 +359,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       clean.startsWith('/settings/ai') ||
       clean.startsWith('/settings/models') ||
       clean.startsWith('/settings/agents') ||
-      clean.startsWith('/settings/protocols')
+      clean.startsWith('/settings/protocols') ||
+      clean.startsWith('/settings/embedding')
     ) {
       return 'ai';
     }
@@ -403,11 +404,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           defaultValue: `${modelsCount} Model · ${agentsCount} Ajan · ${protocolsCount} Protokol`,
         }),
         keywords:
-          'yapay zeka ai modeller ajanlar gözlemci ajan observer llm gpt-4o claude deepseek gemini flux sdxl ollama qwen gemma api protokolleri openai anthropic rest javascript script',
+          'yapay zeka ai modeller ajanlar gözlemci ajan observer llm gpt-4o claude deepseek gemini flux sdxl ollama qwen gemma api protokolleri openai anthropic rest javascript script rag embedding bge-m3 siliconflow pgvector',
         hasOwnLayout: true,
         component: (
           <AiSettingsGroupView
             models={models}
+            settings={settings}
+            onSaveSettings={onSaveSettings}
             onSelectModelForChat={onSelectModel}
             onShowToast={onShowToast}
             onProtocolsCountChange={setProtocolsCount}

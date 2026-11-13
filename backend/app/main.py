@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.api.v1.models_router import router as models_router
 from app.api.v1.chat_router import router as chat_router
 from app.api.v1.images_router import router as images_router
+from app.api.v1.embeddings_router import router as embeddings_router
 from app.api.v1.rag_router import router as rag_router
 from app.api.admin.state_router import router as admin_state_router, api_agents_router
 from app.api.admin.users_router import router as admin_users_router
@@ -69,6 +70,7 @@ def register_routers(application: FastAPI) -> None:
     application.include_router(models_router)
     application.include_router(chat_router)
     application.include_router(images_router)
+    application.include_router(embeddings_router)
     application.include_router(rag_router)
     application.include_router(admin_state_router)
     application.include_router(api_agents_router)

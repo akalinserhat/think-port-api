@@ -9,17 +9,20 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Bot, Cpu, Code2, Sparkles } from 'lucide-react';
+import { Bot, Cpu, Code2, Sparkles, Database } from 'lucide-react';
 import { BaseSystemPage, type SystemSettingModule } from '@akalin/ui';
 import { AiAjanlar } from '@akalin/ai_management_module';
-import { AIModelDTO } from '../dtos';
+import { AIModelDTO, GatewaySettingsDTO } from '../dtos';
 import { ModelRegistry } from '../models';
 import { protocolService } from '../services';
 import { AiModelsView } from './AiModelsView';
 import { ApiProtocolsView } from './ApiProtocolsView';
+import { RagEmbeddingSettingsView } from './RagEmbeddingSettingsView';
 
 export interface AiSettingsGroupViewProps {
   models?: AIModelDTO[];
+  settings: GatewaySettingsDTO;
+  onSaveSettings: (updated: GatewaySettingsDTO) => Promise<void>;
   onSelectModelForChat?: (modelId: string) => void;
   onShowToast: (msg: string) => void;
   onProtocolsCountChange?: (count: number) => void;
@@ -29,6 +32,8 @@ export interface AiSettingsGroupViewProps {
 
 export const AiSettingsGroupView: React.FC<AiSettingsGroupViewProps> = ({
   models = [],
+  settings,
+  onSaveSettings,
   onSelectModelForChat,
   onShowToast,
   onProtocolsCountChange,
@@ -101,7 +106,7 @@ export const AiSettingsGroupView: React.FC<AiSettingsGroupViewProps> = ({
       }
       return seg;
     }
-    const directMatch = clean.match(/^\/settings\/(models|protocols|agents)(?:\/|$)/);
+    const directMatch = clean.match(/^\/settings\/(models|protocols|agents|embedding)(?:\/|$)/);
     if (directMatch) {
       return directMatch[1];
     }
@@ -180,6 +185,26 @@ export const AiSettingsGroupView: React.FC<AiSettingsGroupViewProps> = ({
           />
         ),
       },
+      {
+        id: 'embedding',
+        name: t('settings.embeddingModuleTitle', 'RAG & Embedding (BAAI/bge-m3)'),
+        desc: t(
+          'settings.embeddingModuleDesc',
+          'Bulut dökümanlarını semantik olarak parçalayan (chunking) ve PostgreSQL pgvector (1024d) üzerinde indeksleyen sağlayıcı bağımsız online/yerel BAAI/bge-m3 yapılandırması'
+        ),
+        icon: <Database size={22} />,
+        badge: t('settings.embeddingBadge', 'BAAI/bge-m3 · 1024d'),
+        keywords:
+          'rag embedding baai bge-m3 1024 pgvector semantik chunking siliconflow cloudflare huggingface openrouter deepinfra ollama vektör indeksleme',
+        hasOwnLayout: true,
+        component: (
+          <RagEmbeddingSettingsView
+            settings={settings}
+            onSaveSettings={onSaveSettings}
+            onShowToast={onShowToast}
+          />
+        ),
+      },
     ],
     [
       t,
@@ -187,6 +212,8 @@ export const AiSettingsGroupView: React.FC<AiSettingsGroupViewProps> = ({
       agentsCount,
       protocolsCount,
       models,
+      settings,
+      onSaveSettings,
       onSelectModelForChat,
       onShowToast,
       onModelsCountChange,

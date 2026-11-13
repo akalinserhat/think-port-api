@@ -317,15 +317,18 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
   }, [generatedClassCode, onShowToast, t]);
 
   const renderModelCards = useCallback(
-    (sourceFilter: 'all' | ThinkPortModelSourceType) => {
+    (sourceFilter: 'all' | ThinkPortModelSourceType | 'embedding') => {
       const baseList =
         sourceFilter === 'all'
           ? allModels
-          : allModels.filter((m) =>
-              sourceFilter === 'web'
-                ? m.sourceType === 'web' || m.sourceType === 'external'
-                : m.sourceType === sourceFilter
-            );
+          : sourceFilter === 'embedding'
+            ? allModels.filter((m) => m.category === 'embedding')
+            : allModels.filter((m) =>
+                sourceFilter === 'web'
+                  ? (m.sourceType === 'web' || m.sourceType === 'external') &&
+                    m.category !== 'embedding'
+                  : m.sourceType === sourceFilter && m.category !== 'embedding'
+              );
 
       const filtered = filterItems(baseList, (m) => [
         m.id,
@@ -381,14 +384,18 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
                     icon: <FileCode2 size={16} />,
                     onClick: () => handleOpenInspect(model, 'code'),
                   },
-                  {
-                    label: t('models.testInStudioAction', 'Sohbet Stüdyosunda Dene'),
-                    icon: <MessageSquare size={16} />,
-                    onClick: () => {
-                      onSelectModelForChat?.(model.id);
-                      navigate('/chat');
-                    },
-                  },
+                  ...(model.category !== 'embedding'
+                    ? [
+                        {
+                          label: t('models.testInStudioAction', 'Sohbet Stüdyosunda Dene'),
+                          icon: <MessageSquare size={16} />,
+                          onClick: () => {
+                            onSelectModelForChat?.(model.id);
+                            navigate('/chat');
+                          },
+                        },
+                      ]
+                    : []),
                   ...(!model.isSystemModel
                     ? [
                         {
@@ -499,6 +506,12 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
         label: t('models.tabImage', 'Görsel Üretim'),
         icon: <ImageIcon size={16} />,
         content: renderModelCards('image'),
+      },
+      {
+        id: 'embedding',
+        label: t('models.tabEmbedding', 'Embedding & Vektör (RAG)'),
+        icon: <Brain size={16} />,
+        content: renderModelCards('embedding'),
       },
     ],
     [allModels.length, renderModelCards, t]
