@@ -979,19 +979,6 @@ class MessageFormatterService:
                     image_parts.append(img_part)
                     text_segments.append(img_label)
 
-        # Ekli belge varsa önce belge metnini, ardından kullanıcının talimatını da sona yerleştirerek
-        # uzun PDF metinlerinden sonra modelin asıl görevi unutmasını engelle.
-        if doc_segments and text_segments:
-            user_task_reminder = "\n\n".join(t.strip() for t in text_segments if t.strip()).strip()
-            combined_segments = (
-                text_segments
-                + doc_segments
-                + [
-                    f"[GÖREV HATIRLATMASI — YUKARIDAKİ EKLİ BELGEYİ AŞAĞIDAKİ KULLANICI VE SİSTEM TALİMATINA BİREBİR UYARAK İŞLE]:\n{user_task_reminder}"
-                ]
-            )
-            return combined_segments, image_parts
-
         return text_segments + doc_segments, image_parts
 
     @classmethod

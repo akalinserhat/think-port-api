@@ -104,11 +104,20 @@ async def stream_conversation_events(request: Request) -> StreamingResponse:
                 "revision": conversation_event_broadcaster.revision,
             }
             yield f"data: {json.dumps(init_payload, ensure_ascii=False)}\n\n"
+            idle_ticks = 0
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    event_data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    import gc
+                    from uvicorn import Server as UvicornServer
+                    if any(isinstance(o, UvicornServer) and getattr(o, "should_exit", False) for o in gc.get_objects()):
+                        break
+                except Exception:
+                    pass
+                try:
+                    event_data = await asyncio.wait_for(queue.get(), timeout=2.5)
+                    idle_ticks = 0
                     # Kısa birleştirme penceresi: eşzamanlı patlamalarda (burst) kuyruktaki son durumu al
                     await asyncio.sleep(0.15)
                     while not queue.empty():
@@ -118,7 +127,10 @@ async def stream_conversation_events(request: Request) -> StreamingResponse:
                             break
                     yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
+                    idle_ticks += 1
+                    if idle_ticks >= 6:
+                        idle_ticks = 0
+                        yield ": heartbeat\n\n"
         except asyncio.CancelledError:
             pass
         finally:

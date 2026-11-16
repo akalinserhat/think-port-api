@@ -134,6 +134,8 @@ const INITIAL_FALLBACK_STATE: AdminStateResponseDTO = {
   },
 };
 
+const STORAGE_API_KEY = 'thinkport_active_api_key';
+
 export const App: React.FC = () => {
   const { t } = useTranslation();
   const location = useLocation();
@@ -184,9 +186,21 @@ export const App: React.FC = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [adminState, setAdminState] = useState<AdminStateResponseDTO>(INITIAL_FALLBACK_STATE);
   const [selectedModelId, setSelectedModelId] = useState<string>('');
-  const [apiKey, setApiKey] = useState<string>('sk-gw-demo-key-123456');
+  const [apiKey, setApiKey] = useState<string>(() => {
+    return (localStorage.getItem(STORAGE_API_KEY) || '').trim();
+  });
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+
+  const handleUpdateApiKey = useCallback((newKey: string) => {
+    const trimmed = (newKey || '').trim();
+    setApiKey(trimmed);
+    if (trimmed && trimmed !== 'sk-gw-demo-key-123456') {
+      localStorage.setItem(STORAGE_API_KEY, trimmed);
+    } else {
+      localStorage.removeItem(STORAGE_API_KEY);
+    }
+  }, []);
 
   const showToast = useCallback((msg: string) => {
     toast.success(msg);
@@ -257,6 +271,49 @@ export const App: React.FC = () => {
             : INITIAL_FALLBACK_STATE.models;
         return adminService.selectPreferredModelId(effectiveModels, prev);
       });
+
+      // Aktif API anahtarını doğrula ve otomatik senkronize et
+      const incomingKeys = Array.isArray(data.api_keys) ? data.api_keys : [];
+      const activeRawKeys = incomingKeys.filter(
+        (k: ApiKeyRecordDTO) => k.is_active && k.raw_preview && k.raw_preview.trim()
+      );
+
+      setApiKey((currentKey) => {
+        const storedKey = (localStorage.getItem(STORAGE_API_KEY) || '').trim();
+        const isCurrentValid = activeRawKeys.some(
+          (k) =>
+            k.raw_preview &&
+            k.raw_preview.trim() === (currentKey || '').trim() &&
+            currentKey !== 'sk-gw-demo-key-123456'
+        );
+        if (isCurrentValid) {
+          return currentKey;
+        }
+
+        const isStoredValid = activeRawKeys.some(
+          (k) =>
+            k.raw_preview &&
+            k.raw_preview.trim() === storedKey &&
+            storedKey !== 'sk-gw-demo-key-123456'
+        );
+        if (isStoredValid) {
+          return storedKey;
+        }
+
+        const auth = systemUserService.getAuthenticatedUser();
+        const targetUid = auth?.id || 'sys_usr_01';
+        const userMatchedKey =
+          activeRawKeys.find((k) => k.user_id === targetUid) ||
+          activeRawKeys[0];
+
+        if (userMatchedKey?.raw_preview) {
+          const resolved = userMatchedKey.raw_preview.trim();
+          localStorage.setItem(STORAGE_API_KEY, resolved);
+          return resolved;
+        }
+
+        return '';
+      });
     } catch {
       // Keep current state if backend is temporarily unreachable
     }
@@ -299,7 +356,7 @@ export const App: React.FC = () => {
         api_key: customApiKey,
       });
       if (data.api_key) {
-        setApiKey(data.api_key);
+        handleUpdateApiKey(data.api_key);
         setNewlyCreatedKey(data.api_key);
       }
       showToast(t('keys.keyCreatedToast'));
@@ -322,7 +379,7 @@ export const App: React.FC = () => {
 
   const handleCopyAndUseKey = (rawKey: string) => {
     navigator.clipboard.writeText(rawKey);
-    setApiKey(rawKey);
+    handleUpdateApiKey(rawKey);
     showToast(t('keys.keyCopiedToast'));
   };
 
@@ -517,7 +574,7 @@ export const App: React.FC = () => {
               selectedModelId={selectedModelId}
               onSelectModel={setSelectedModelId}
               apiKey={apiKey}
-              onChangeApiKey={setApiKey}
+              onChangeApiKey={handleUpdateApiKey}
               isGenerating={isGenerating}
               setIsGenerating={setIsGenerating}
               onRefreshState={refreshState}

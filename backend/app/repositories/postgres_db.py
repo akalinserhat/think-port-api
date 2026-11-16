@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS ai_agents (
     hafiza_saklama_gun INTEGER NOT NULL DEFAULT 30,
     hafiza_arama_top_k INTEGER NOT NULL DEFAULT 5,
     gozlemci_aktif_mi INTEGER NOT NULL DEFAULT 1,
+    gozlemci_devre_disi INTEGER NOT NULL DEFAULT 0,
     aktif_mi INTEGER NOT NULL DEFAULT 1,
     sistem_kaydi_mi INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -418,6 +419,12 @@ CREATE TABLE IF NOT EXISTS rag_cloud_documents (
     embedding_model TEXT NOT NULL DEFAULT 'BAAI/bge-m3',
     embedding_provider TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'indexed',
+    indexing_stage TEXT NOT NULL DEFAULT '',
+    indexing_progress INTEGER NOT NULL DEFAULT 100,
+    status_detail TEXT NOT NULL DEFAULT '',
+    chunking_mode TEXT NOT NULL DEFAULT '',
+    chunking_agent_kod TEXT NOT NULL DEFAULT '',
+    chunking_model TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -717,6 +724,30 @@ class PostgresDatabaseManager:
             conn.execute(
                 "ALTER TABLE rag_cloud_documents ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''"
             )
+        if "indexing_stage" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN indexing_stage TEXT NOT NULL DEFAULT ''"
+            )
+        if "indexing_progress" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN indexing_progress INTEGER NOT NULL DEFAULT 100"
+            )
+        if "status_detail" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN status_detail TEXT NOT NULL DEFAULT ''"
+            )
+        if "chunking_mode" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN chunking_mode TEXT NOT NULL DEFAULT ''"
+            )
+        if "chunking_agent_kod" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN chunking_agent_kod TEXT NOT NULL DEFAULT ''"
+            )
+        if "chunking_model" not in doc_cols:
+            conn.execute(
+                "ALTER TABLE rag_cloud_documents ADD COLUMN chunking_model TEXT NOT NULL DEFAULT ''"
+            )
 
         chunk_cols = {
             row["name"]
@@ -808,10 +839,17 @@ class PostgresDatabaseManager:
             conn.execute("ALTER TABLE ai_agents ADD COLUMN hafiza_arama_top_k INTEGER NOT NULL DEFAULT 5")
         if "gozlemci_aktif_mi" not in agent_cols:
             conn.execute("ALTER TABLE ai_agents ADD COLUMN gozlemci_aktif_mi INTEGER NOT NULL DEFAULT 1")
+        if "gozlemci_devre_disi" not in agent_cols:
+            conn.execute("ALTER TABLE ai_agents ADD COLUMN gozlemci_devre_disi INTEGER NOT NULL DEFAULT 0")
 
-        # Varsayılan Webakus ERP ajanının uygulama_id değerini WEBAKUS_ERP olarak güncelle
+        # RAG-VEKTOR-UZMANI ajanında gözlemciyi devre dışı bırak (gozlemci_aktif_mi = 0, gozlemci_devre_disi = 1)
         conn.execute(
-            "UPDATE ai_agents SET uygulama_id = 'WEBAKUS_ERP' WHERE kod = 'WEBAKUS_ERP_ASISTANI' AND (uygulama_id = '' OR uygulama_id = 'THINKPORT_CORE')"
+            "UPDATE ai_agents SET gozlemci_aktif_mi = 0, gozlemci_devre_disi = 1 WHERE UPPER(TRIM(kod)) = 'RAG-VEKTOR-UZMANI'"
+        )
+
+        # Kullanılmayan diğer ajanları kaldır, yalnızca aktif teknik altyapı ajanlarını tut
+        conn.execute(
+            "DELETE FROM ai_agents WHERE UPPER(TRIM(kod)) NOT IN ('GOZLEMCI_AJAN', 'RAG-VEKTOR-UZMANI')"
         )
 
         conv_cols = {
@@ -1172,8 +1210,33 @@ class PostgresDatabaseManager:
 
     @staticmethod
     def _seed_default_api_keys_if_empty(conn: PgWireConnection) -> None:
-        """Örnek API anahtarı otomatik eklemesi devre dışı bırakıldı."""
-        return None
+        """Kayıtlı aktif API anahtarı yoksa sistem yöneticisi (sys_usr_01) için varsayılan anahtar üretir."""
+        key_count = conn.execute("SELECT COUNT(1) FROM api_keys WHERE is_active = 1").fetchone()[0]
+        if key_count == 0:
+            import secrets
+            raw_key = f"sk-gw-{secrets.token_urlsafe(24)}"
+            prefix = f"{raw_key[:12]}..."
+            key_hash = hash_api_key(raw_key)
+            now = datetime.now(timezone.utc)
+            expires_at = (now + timedelta(days=365)).isoformat()
+            now_iso = now.isoformat()
+            conn.execute(
+                """
+                INSERT INTO api_keys (
+                    id, user_id, name, key_prefix, raw_preview, key_hash, is_active, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    "key_init_sysadmin",
+                    "sys_usr_01",
+                    "Sistem Yöneticisi Varsayılan Anahtarı",
+                    prefix,
+                    raw_key,
+                    key_hash,
+                    expires_at,
+                    now_iso,
+                ),
+            )
 
     @staticmethod
     def _seed_default_conversations_if_empty(conn: PgWireConnection) -> None:
@@ -1935,49 +1998,24 @@ class PostgresDatabaseManager:
             ),
             (
                 2,
-                "ThinkPort Genel AI Asistanı",
-                "THINKPORT_GENEL_ASISTAN",
-                "ThinkPort Sohbet Stüdyosu ve /v1 API istekleri için çok modelli genel asistan ve pgvector RAG doküman analiz uzmanı.",
-                "Çok Modelli Genel AI & Doküman Analiz Asistanı",
-                "Bot",
-                "#6366f1",
+                "RAG Vektör Uzmanı",
+                "RAG-VEKTOR-UZMANI",
+                "Buluta yüklenen belgelerin ve metin parçalarının vektör embedding hesaplamalarını yerel Ollama bge-m3:latest modeli ile yürüten teknik altyapı ajanı.",
+                "RAG Vektör & Embedding Uzmanı",
+                "Cpu",
+                "#0284c7",
                 1,
                 None,
-                _json.dumps(general_rules, ensure_ascii=False),
-                general_prompt,
+                "[]",
+                "",
                 "[]",
                 1,
-                "gpt-4o",
-                _json.dumps(["claude-3-5-sonnet", "deepseek-r1"], ensure_ascii=False),
-                0.7,
-                4096,
-                0,
-                _json.dumps(["rag_search_documents"], ensure_ascii=False),
-                1,
-                1,
-                now_iso,
-                now_iso,
-            ),
-            (
-                3,
-                "Webakus ERP & MCP Uzman Ajanı",
-                "WEBAKUS_ERP_ASISTANI",
-                "Webakus ERP modülleri, ticari belgeler, cari hesaplar ve görsel Flowchart görev akışları için temel kök (Base) uzman ajan.",
-                "Kurumsal ERP, Belge & Görev Akışı (Flowchart) Ajanı",
-                "Sparkles",
-                "#3b82f6",
-                1,
-                None,
-                _json.dumps(erp_rules, ensure_ascii=False),
-                erp_prompt,
+                "bge-m3:latest",
                 "[]",
-                1,
-                "gpt-4o",
-                _json.dumps(["claude-3-5-sonnet"], ensure_ascii=False),
-                0.4,
-                4096,
+                0.0,
+                1024,
                 0,
-                _json.dumps(["erp_query_data", "erp_navigate", "erp_create_document", "erp_request_confirmation", "erp_get_page_context", "erp_list_cloud_files"], ensure_ascii=False),
+                "[]",
                 1,
                 1,
                 now_iso,

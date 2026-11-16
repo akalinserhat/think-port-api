@@ -160,140 +160,6 @@ function stripUiTraceBlocksFromText(text: string): string {
   return cleaned.trim();
 }
 
-function describeJsonShape(parsed: any): string {
-  if (Array.isArray(parsed)) {
-    return `${parsed.length} öğeli JSON Dizisi`;
-  }
-  if (parsed && typeof parsed === 'object') {
-    const keys = Object.keys(parsed);
-    const previewKeys = keys.slice(0, 3).join(', ');
-    return keys.length > 0
-      ? `${keys.length} alanlı JSON Nesnesi (${previewKeys}${keys.length > 3 ? ', …' : ''})`
-      : 'Boş JSON Nesnesi';
-  }
-  return 'JSON Verisi';
-}
-
-function findBalancedJsonEnd(text: string, startIndex: number): number {
-  const openChar = text[startIndex];
-  const closeChar = openChar === '{' ? '}' : openChar === '[' ? ']' : '';
-  if (!closeChar) return -1;
-
-  let depth = 0;
-  let inString = false;
-  let isEscaped = false;
-
-  for (let i = startIndex; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (isEscaped) {
-        isEscaped = false;
-      } else if (ch === '\\') {
-        isEscaped = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-
-    if (ch === openChar) {
-      depth++;
-    } else if (ch === closeChar) {
-      depth--;
-      if (depth === 0) {
-        return i;
-      }
-    }
-  }
-
-  return -1;
-}
-
-function formatUnfencedJsonInSegment(segment: string): {
-  formatted: string;
-  extractedCount: number;
-} {
-  if (!segment || !segment.trim()) {
-    return { formatted: segment, extractedCount: 0 };
-  }
-
-  let result = '';
-  let cursor = 0;
-  let extractedCount = 0;
-
-  while (cursor < segment.length) {
-    let nextBrace = -1;
-    for (let i = cursor; i < segment.length; i++) {
-      if (segment[i] === '{' || segment[i] === '[') {
-        nextBrace = i;
-        break;
-      }
-    }
-
-    if (nextBrace === -1) {
-      result += segment.slice(cursor);
-      break;
-    }
-
-    const endBrace = findBalancedJsonEnd(segment, nextBrace);
-    if (endBrace === -1) {
-      result += segment.slice(cursor, nextBrace + 1);
-      cursor = nextBrace + 1;
-      continue;
-    }
-
-    const candidate = segment.slice(nextBrace, endBrace + 1);
-    const parsed = safeParseJson<any>(candidate);
-    const beforeSlice = segment.slice(cursor, nextBrace);
-    const labelMatch = beforeSlice.match(/(?:^|\n)\s*\[([^\][\n]{2,80})\]\s*:\s*$/);
-
-    const isStructuredJson =
-      parsed !== null &&
-      typeof parsed === 'object' &&
-      (Array.isArray(parsed)
-        ? parsed.length > 0 || Boolean(labelMatch) || candidate.includes('\n')
-        : Object.keys(parsed).length > 0 || Boolean(labelMatch));
-
-    if (!isStructuredJson) {
-      result += segment.slice(cursor, nextBrace + 1);
-      cursor = nextBrace + 1;
-      continue;
-    }
-
-    extractedCount++;
-    const prettyJson = JSON.stringify(parsed, null, 2);
-    const byteLen = getUtf8ByteLength(candidate);
-    const shapeDesc = describeJsonShape(parsed);
-
-    if (labelMatch && labelMatch.index !== undefined) {
-      const cleanBefore = beforeSlice.slice(0, labelMatch.index).trimEnd();
-      const labelTitle = labelMatch[1].trim();
-      if (cleanBefore) {
-        result += `${cleanBefore}\n\n`;
-      }
-      result += `:::details [Gönderilen JSON Verisi (${labelTitle} — ${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${prettyJson}\n\`\`\`\n:::\n\n`;
-    } else {
-      const trimmedBefore = beforeSlice.trimEnd();
-      if (trimmedBefore) {
-        result += `${trimmedBefore}\n\n`;
-      }
-      result += `:::details [Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${prettyJson}\n\`\`\`\n:::\n\n`;
-    }
-
-    cursor = endBrace + 1;
-  }
-
-  return {
-    formatted: result.replace(/\n{3,}/g, '\n\n').trim(),
-    extractedCount,
-  };
-}
-
 function formatOutgoingJsonContent(rawText: string, role: string): {
   formattedMarkdown: string;
   hasJsonData: boolean;
@@ -321,65 +187,26 @@ function formatOutgoingJsonContent(rawText: string, role: string): {
     } else if (!workingText.startsWith('🔧')) {
       toolHeaderPrefix = '🔧 **Gönderilen MCP Araç Yanıtı (Tool Execution Result):**\n\n';
     }
+    return {
+      formattedMarkdown: `${toolHeaderPrefix}${workingText}`.trim(),
+      hasJsonData: true,
+    };
   }
 
-  const fenceRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
-  const parts: string[] = [];
-  let lastIdx = 0;
-  let hasJsonData = false;
-  let match: RegExpExecArray | null;
-
-  while ((match = fenceRegex.exec(workingText)) !== null) {
-    if (match.index > lastIdx) {
-      const outside = workingText.slice(lastIdx, match.index);
-      const { formatted, extractedCount } = formatUnfencedJsonInSegment(outside);
-      if (extractedCount > 0) hasJsonData = true;
-      if (formatted) parts.push(formatted);
-    }
-
-    const fenceLang = (match[1] || '').trim().toLowerCase();
-    const fenceBody = (match[2] || '').trim();
-    const parsedFenceJson =
-      fenceLang === 'json' || fenceLang === ''
-        ? safeParseJson<any>(fenceBody)
-        : null;
-
-    if (parsedFenceJson !== null && typeof parsedFenceJson === 'object') {
-      hasJsonData = true;
-      const pretty = JSON.stringify(parsedFenceJson, null, 2);
-      const byteLen = getUtf8ByteLength(fenceBody);
-      const shapeDesc = describeJsonShape(parsedFenceJson);
-      parts.push(
-        `:::details [Gönderilen JSON Verisi (${shapeDesc} · ${byteLen} bayt)]\n\`\`\`json\n${pretty}\n\`\`\`\n:::`
-      );
-    } else {
-      parts.push(match[0]);
-    }
-
-    lastIdx = match.index + match[0].length;
-  }
-
-  if (lastIdx < workingText.length) {
-    const tail = workingText.slice(lastIdx);
-    const { formatted, extractedCount } = formatUnfencedJsonInSegment(tail);
-    if (extractedCount > 0) hasJsonData = true;
-    if (formatted) parts.push(formatted);
-  }
-
-  const joined = parts.join('\n\n').trim();
   return {
-    formattedMarkdown: `${toolHeaderPrefix}${joined}`.trim(),
-    hasJsonData,
+    formattedMarkdown: workingText,
+    hasJsonData: false,
   };
 }
 
 function formatOutgoingMessageWithFullTrace(
   record: ConversationMessageRecordDTO,
   conversationSystemPrompt = '',
-  showFullTrace = true
+  _showFullTrace = true
 ): {
   visibleContent: string;
   thinkingSummary: string;
+  rawPayloadObj: Record<string, any>;
 } {
   const rawRecordContent = record.content || '';
   const baseText = stripUiTraceBlocksFromText(rawRecordContent);
@@ -401,93 +228,34 @@ function formatOutgoingMessageWithFullTrace(
         ...att,
       }))
       : rawAttachments;
-  const charLen = baseText.length;
-  const byteLen = getUtf8ByteLength(baseText);
 
-  const outgoingSections: string[] = [formattedMarkdown];
+  // Sadece saf metin gösterilsin, ek şema veya kafa karıştıran bloklar eklenmesin
+  const visibleContent = formattedMarkdown || baseText;
 
-  if (showFullTrace) {
-    const responseFormat = rawPayload?.response_format;
-    if (
-      responseFormat &&
-      typeof responseFormat === 'object' &&
-      responseFormat.type &&
-      responseFormat.type !== 'text'
-    ) {
-      outgoingSections.push(
-        `:::details [Gönderilen Yanıt JSON Şeması (response_format)]\n\`\`\`json\n${JSON.stringify(responseFormat, null, 2)}\n\`\`\`\n:::`
-      );
-    }
-
-    if (toolsList && toolsList.length > 0 && record.role === 'user') {
-      outgoingSections.push(
-        `:::details [LLM'e Gönderilen MCP Araç & JSON Şemaları (tools — ${toolsList.length} adet)]\n\`\`\`json\n${JSON.stringify(toolsList, null, 2)}\n\`\`\`\n:::`
-      );
-    }
-  }
-
-  const visibleContent = outgoingSections.filter(Boolean).join('\n\n');
-
-  const lines: string[] = [];
-  lines.push(
-    `📤 [LLM'E GİDEN TAM İLETİŞİM RAPORU | Rol: ${record.role.toUpperCase()} | Model: ${record.model_id}]`
-  );
-  lines.push(
-    `• İstek ID: ${record.request_id || '—'} | Kaynak: ${(rawPayload?.source || 'studio').toUpperCase()} | Sağlayıcı: ${record.provider || rawPayload?.provider || 'gateway'}`
-  );
-  lines.push(
-    `• Boyut & Token: ${charLen} karakter (${byteLen} bayt) | Girdi Token: ${record.prompt_tokens || rawPayload?.prompt_tokens || 0} tok`
-  );
-
-  if (rawPayload) {
-    const rfStr = rawPayload.response_format
-      ? JSON.stringify(rawPayload.response_format)
-      : 'text';
-    lines.push(
-      `• İstek Parametreleri: stream=${String(rawPayload.stream ?? true)} | temperature=${String(rawPayload.temperature ?? 'varsayılan')} | max_tokens=${String(rawPayload.max_tokens ?? 'varsayılan')} | response_format=${rfStr}`
-    );
-  }
-
-  if (effectiveSysPrompt) {
-    lines.push(
-      `• Sistem Yönergesi (System Prompt — ${effectiveSysPrompt.length} karakter):\n${effectiveSysPrompt}`
-    );
-  }
-
-  if (payloadAttachments && payloadAttachments.length > 0) {
-    lines.push(`• Ekli Dosyalar (${payloadAttachments.length} adet):`);
-    payloadAttachments.forEach((att: any, idx: number) => {
-      const fName = att.file_name || att.name || `dosya_${idx + 1}`;
-      const fKind = att.file_kind || att.kind || 'document';
-      const fSize = att.file_size || att.size || 0;
-      const fTokens = att.estimated_tokens || att.estimatedTokens || 0;
-      const extText = typeof att.extracted_text === 'string' ? att.extracted_text.trim() : '';
-      const extChars = Number(att.extracted_chars || extText.length || 0);
-      lines.push(
-        `  ${idx + 1}) 📎 ${fName} (${fKind}, ${fSize} bayt, Çıkarılan Metin=${extChars} krk, ~${fTokens} token)`
-      );
-      if (showFullTrace && extText) {
-        lines.push(`     [LLM'e Aktarılan Belge Metni (${extChars} krk)]:\n${extText}`);
-      }
-    });
-  }
-
-  if (toolsList && toolsList.length > 0) {
-    lines.push(
-      `• LLM'e Gönderilen Araç Tanımları (Tools — ${toolsList.length} adet | tool_choice=${JSON.stringify(rawPayload?.tool_choice ?? 'auto')}):`
-    );
-    toolsList.forEach((tObj: any, idx: number) => {
-      const fn = tObj?.function || tObj || {};
-      const fnName = fn.name || `tool_${idx + 1}`;
-      const fnDesc = fn.description || '';
-      const fnParams = fn.parameters ? JSON.stringify(fn.parameters, null, 2) : '{}';
-      lines.push(`  ${idx + 1}) ${fnName}: ${fnDesc}\n     Şema:\n${fnParams}`);
-    });
-  }
+  // Tam el değmemiş (saf) istek JSON paketi
+  const rawPayloadObj: Record<string, any> = {
+    id: record.id,
+    request_id: record.request_id || rawPayload?.request_id || '—',
+    role: record.role,
+    model: record.model_id,
+    provider: record.provider || rawPayload?.provider || 'gateway',
+    content: baseText,
+    ...(effectiveSysPrompt ? { system_prompt: effectiveSysPrompt } : {}),
+    ...(toolsList && toolsList.length > 0 ? { tools: toolsList } : {}),
+    ...(payloadAttachments && payloadAttachments.length > 0
+      ? { attachments: payloadAttachments }
+      : {}),
+    ...(rawPayload?.response_format ? { response_format: rawPayload.response_format } : {}),
+    ...(rawPayload?.temperature !== undefined ? { temperature: rawPayload.temperature } : {}),
+    ...(rawPayload?.max_tokens !== undefined ? { max_tokens: rawPayload.max_tokens } : {}),
+    ...(record.prompt_tokens ? { prompt_tokens: record.prompt_tokens } : {}),
+    ...(rawPayload || {}),
+  };
 
   return {
     visibleContent,
-    thinkingSummary: lines.join('\n'),
+    thinkingSummary: '',
+    rawPayloadObj,
   };
 }
 
@@ -512,11 +280,12 @@ function expandToolCallsForDisplay(toolCalls: any[] | null | undefined): any[] {
 
 function formatAssistantMessageWithFullTrace(
   record: ConversationMessageRecordDTO,
-  showFullTrace = true
+  _showFullTrace = true
 ): {
   visibleContent: string;
   cleanContentForHistory: string;
   thinkingSummary: string;
+  rawPayloadObj: Record<string, any>;
 } {
   const rawRecordContent = record.content || '';
   const rawContent = stripUiTraceBlocksFromText(rawRecordContent);
@@ -551,92 +320,31 @@ function formatAssistantMessageWithFullTrace(
     rawContent ||
     (typeof rawPayload?.normalized_output === 'string' ? rawPayload.normalized_output : '');
 
-  if (
-    expandedToolCalls.length > 0 &&
-    cleanAnswer.trimStart().startsWith('[Araç Çağrısı:')
-  ) {
-    const callNames = expandedToolCalls
-      .map((tc) => tc?.function?.name || 'tool')
-      .join(', ');
-    cleanAnswer = `🔧 **Tetiklenen Araç Çağrısı (\`${callNames}\`):**\n\`\`\`json\n${JSON.stringify(expandedToolCalls, null, 2)}\n\`\`\``;
-  }
+  // Asıl yanıt temiz kalır; ek raporlar, şemalar veya gömülü akordiyonlar eklenmez
+  const visibleContent = cleanAnswer || '*(Boş metin yanıtı)*';
 
-  const fullThinkingAccordion =
-    record.thinking_content ||
-    (extractedThought
-      ? `🧠 [LLM DÜŞÜNCE SÜRECİ]\n${extractedThought}`
-      : `📥 [GELEN LLM YANITI] Model: ${record.model_id} | Token: ${record.total_tokens} | Süre: ${record.latency_ms} ms`);
-
-  if (!showFullTrace) {
-    return {
-      visibleContent: cleanAnswer,
-      cleanContentForHistory: cleanAnswer,
-      thinkingSummary: fullThinkingAccordion,
-    };
-  }
-
-  const sections: string[] = [];
-
-  // 1. LLM Düşünce & İçsel Muhakeme Bölümü ([Açıklama] > olarak açılır/kapanır)
-  if (extractedThought) {
-    sections.push(
-      `:::details [LLM Düşünce & İçsel Muhakeme Süreci (Chain-of-Thought)]\n\`\`\`text\n${extractedThought}\n\`\`\`\n:::`
-    );
-  } else {
-    sections.push(
-      `:::details [LLM Düşünce & Karar Süreci]\nModel (\`${record.model_id}\` · \`${record.provider || 'gateway'}\`) gelen istemi değerlendirerek **${record.ttft_ms || record.latency_ms || 0} ms** içinde ilk token'ı üretti ve toplam **${record.latency_ms || 0} ms** sürede **${getUtf8ByteLength(cleanAnswer)} bayt (${cleanAnswer.length} karakter)** uzunluğunda yanıt döndürdü.\n:::`
-    );
-  }
-
-  // 2. Asıl LLM Yanıtı (Tek bir nokta bile olsa tam gösterim)
-  if (cleanAnswer) {
-    sections.push(cleanAnswer);
-  } else {
-    sections.push('*(Boş metin yanıtı — 0 karakter)*');
-  }
-
-  // 3. Araç Çağrıları (tool_calls) varsa ve cleanAnswer içinde henüz kod bloğu olarak yoksa ekle
-  if (
-    expandedToolCalls.length > 0 &&
-    !cleanAnswer.includes('```json')
-  ) {
-    sections.push(
-      `:::details [Tetiklenen Araç Çağrıları (tool_calls — ${expandedToolCalls.length} adet)]\n\`\`\`json\n${JSON.stringify(expandedToolCalls, null, 2)}\n\`\`\`\n:::`
-    );
-  }
-
-  // 4. Ham (Filtrelenmemiş) Çıktı farklıysa (ör. JSON normalize edilmişse) onu da raporla
-  const rawUnfiltered = (rawPayload?.raw_unfiltered_output as string) || '';
-  if (
-    rawUnfiltered &&
-    !rawUnfiltered.trimStart().startsWith('[Araç Çağrısı:') &&
-    rawUnfiltered.trim() !== cleanAnswer.trim() &&
-    rawUnfiltered.trim() !== rawContent.trim()
-  ) {
-    sections.push(
-      `:::details [Modelin Ham (Filtrelenmemiş / Normalize Edilmemiş) Çıktısı (${rawUnfiltered.length} krk)]\n\`\`\`text\n${rawUnfiltered}\n\`\`\`\n:::`
-    );
-  }
-
-  // 5. Gelen İletişim & Telemetri Alt Raporu
   const charLen = cleanAnswer.length;
   const byteLen = getUtf8ByteLength(cleanAnswer);
   const sessionId = rawPayload?.session_id || '—';
   const reqId = record.request_id || rawPayload?.request_id || '—';
   const streamLabel =
     rawPayload?.is_stream === false ? 'Senkron JSON' : 'SSE Gerçek Zamanlı Akış';
-  const responseTypeDesc =
-    expandedToolCalls.length > 0
-      ? `MCP Araç Çağrısı (\`${expandedToolCalls.map((tc) => tc?.function?.name || 'tool').join(', ')}\`)`
-      : 'Metin / JSON Yanıtı';
+  const rawUnfiltered = (rawPayload?.raw_unfiltered_output as string) || '';
 
-  const incomingReportPayload: Record<string, any> = {
+  // Tam el değmemiş (saf) yanıt JSON paketi
+  const rawPayloadObj: Record<string, any> = {
+    id: record.id,
     request_id: reqId,
+    role: 'assistant',
     model: record.model_id,
     provider: record.provider || rawPayload?.provider || 'gateway',
     session_id: sessionId,
     mode: streamLabel,
     status: record.status || 'success',
+    content: cleanAnswer,
+    ...(extractedThought ? { thinking_content: extractedThought } : {}),
+    ...(expandedToolCalls.length > 0 ? { tool_calls: expandedToolCalls } : {}),
+    ...(rawUnfiltered && rawUnfiltered !== cleanAnswer ? { raw_unfiltered_output: rawUnfiltered } : {}),
     metrics: {
       prompt_tokens: record.prompt_tokens,
       completion_tokens: record.completion_tokens,
@@ -646,38 +354,16 @@ function formatAssistantMessageWithFullTrace(
       char_length: charLen,
       byte_length: byteLen,
     },
+    ...(record.error_detail ? { error_detail: record.error_detail } : {}),
+    ...(rawPayload || {}),
   };
-  if (extractedThought) {
-    incomingReportPayload.thinking_content = extractedThought;
-  }
-  if (rawUnfiltered && !rawUnfiltered.trimStart().startsWith('[Araç Çağrısı:')) {
-    incomingReportPayload.raw_output = safeParseJson<any>(rawUnfiltered) ?? rawUnfiltered;
-  } else if (
-    cleanAnswer &&
-    !cleanAnswer.trimStart().startsWith('🔧') &&
-    !cleanAnswer.trimStart().startsWith('[Araç Çağrısı:')
-  ) {
-    incomingReportPayload.content = safeParseJson<any>(cleanAnswer) ?? cleanAnswer;
-  }
-  if (expandedToolCalls.length > 0) {
-    incomingReportPayload.tool_calls = expandedToolCalls;
-  }
-  if (record.error_detail) {
-    incomingReportPayload.error_detail = record.error_detail;
-  }
-
-  sections.push(
-    `:::details [Gelen LLM İletişim Raporu]\n` +
-    `- **İstek & Oturum:** \`İstek ID: ${reqId}\` · \`Oturum: ${sessionId}\` · \`Sağlayıcı: ${record.provider || 'gateway'}\` · \`Mod: ${streamLabel}\`\n` +
-    `- **Yanıt Türü & Boyut:** ${responseTypeDesc} · \`${charLen} krk (${byteLen} bayt)\` · \`Durum: ${record.status || 'success'}\`\n` +
-    `- **Token & Performans:** \`Girdi: ${record.prompt_tokens} tok\` · \`Çıktı: ${record.completion_tokens} tok\` · \`Toplam: ${record.total_tokens} tok\` · \`TTFT: ${record.ttft_ms || 0} ms\` · \`Toplam Süre: ${record.latency_ms || 0} ms\`${record.error_detail ? `\n- **Hata Detayı:** \`${record.error_detail}\`` : ''}\n` +
-    `\`\`\`json\n${JSON.stringify(incomingReportPayload, null, 2)}\n\`\`\`\n:::`
-  );
 
   return {
-    visibleContent: sections.join('\n\n'),
+    visibleContent,
     cleanContentForHistory: cleanAnswer,
-    thinkingSummary: fullThinkingAccordion,
+    // thinkingSummary: SADECE ve SADECE modelin gerçek düşünceleri (Yapay Zeka Düşünce & Analiz Süreci)
+    thinkingSummary: extractedThought.trim(),
+    rawPayloadObj,
   };
 }
 
@@ -696,13 +382,14 @@ function mapRecordToBaseChatMessage(
           : 'user';
 
   if (mappedRole === 'assistant') {
-    const { visibleContent, cleanContentForHistory, thinkingSummary } =
+    const { visibleContent, cleanContentForHistory, thinkingSummary, rawPayloadObj } =
       formatAssistantMessageWithFullTrace(record, showFullTrace);
     return {
       id: record.id,
       role: mappedRole,
       content: visibleContent,
-      thinkingContent: thinkingSummary,
+      thinkingContent: thinkingSummary || undefined,
+      rawPayload: rawPayloadObj,
       timestamp: record.created_at || new Date().toISOString(),
       model: record.model_id,
       provider: record.provider || 'Web AI Gateway',
@@ -716,13 +403,14 @@ function mapRecordToBaseChatMessage(
       customData: {
         rawCleanContent: cleanContentForHistory,
         rawRecord: record,
+        rawPayload: rawPayloadObj,
       },
     };
   }
 
   const {
     visibleContent: formattedUserOrToolContent,
-    thinkingSummary: outgoingThinkingSummary,
+    rawPayloadObj: outgoingRawPayloadObj,
   } = formatOutgoingMessageWithFullTrace(record, conversationSystemPrompt, showFullTrace);
 
   const rawPayloadObj = safeParseJson<Record<string, any>>(record.raw_payload_json);
@@ -773,7 +461,8 @@ function mapRecordToBaseChatMessage(
     id: record.id,
     role: mappedRole,
     content: formattedUserOrToolContent,
-    thinkingContent: outgoingThinkingSummary || record.thinking_content || undefined,
+    thinkingContent: undefined,
+    rawPayload: outgoingRawPayloadObj,
     timestamp: record.created_at || new Date().toISOString(),
     model: record.model_id,
     provider: record.provider || 'Web AI Gateway',
@@ -801,6 +490,7 @@ function mapRecordToBaseChatMessage(
     customData: {
       rawCleanContent: stripUiTraceBlocksFromText(record.content || ''),
       rawRecord: record,
+      rawPayload: outgoingRawPayloadObj,
       parsedAttachments: mergedAttachments.length > 0 ? mergedAttachments : undefined,
     },
   };
@@ -976,14 +666,38 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
     (newUserId: string) => {
       setActiveUserId(newUserId);
       setAdminSelectedUserFilter('all');
-      const userKey = apiKeys.find((k) => k.user_id === newUserId && k.raw_preview);
+      const userKey = apiKeys.find((k) => k.user_id === newUserId && k.is_active && k.raw_preview);
       if (userKey?.raw_preview) {
-        onChangeApiKey(userKey.raw_preview);
+        onChangeApiKey(userKey.raw_preview.trim());
       }
       setRefreshCounter((prev) => prev + 1);
     },
     [apiKeys, onChangeApiKey]
   );
+
+  // apiKeys prop'u yüklendiğinde veya aktif kullanıcı değiştiğinde API anahtarını doğrula ve senkronize et
+  useEffect(() => {
+    if (!apiKeys || apiKeys.length === 0) return;
+    const targetUserId = currentUser?.id || activeUserId || 'sys_usr_01';
+    const activeValidKeys = apiKeys.filter(
+      (k) => k.is_active && k.raw_preview && k.raw_preview.trim()
+    );
+    const isCurrentValid = activeValidKeys.some(
+      (k) =>
+        k.raw_preview &&
+        k.raw_preview.trim() === (apiKey || '').trim() &&
+        apiKey !== 'sk-gw-demo-key-123456'
+    );
+    if (!isCurrentValid && activeValidKeys.length > 0) {
+      const bestKey =
+        activeValidKeys.find((k) => k.user_id === targetUserId) ||
+        activeValidKeys.find((k) => k.user_id === 'sys_usr_01') ||
+        activeValidKeys[0];
+      if (bestKey?.raw_preview) {
+        onChangeApiKey(bestKey.raw_preview.trim());
+      }
+    }
+  }, [apiKeys, currentUser?.id, activeUserId, apiKey, onChangeApiKey]);
 
   // Kullanıcının mevcut sohbet listesini BaseChatPage yan menüsü için yükler
   const loadSidebarSessionsForChat = useCallback(async (): Promise<ChatSession[]> => {
@@ -1395,18 +1109,22 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         attachments?.[0]?.name ||
         'Yeni Sohbet';
 
-      const optimisticUserThinking = [
-        `📤 [LLM'E GİDEN İSTEK HAZIRLANIYOR | Model: ${activeModel}]`,
-        `• Boyut: ${content.length} karakter (${getUtf8ByteLength(content)} bayt)`,
-        ...(chatSystemPrompt
-          ? [`• Sistem Yönergesi (${chatSystemPrompt.length} krk):\n${chatSystemPrompt}`]
-          : []),
+      const optimisticUserRawPayload: Record<string, any> = {
+        id: userMsgId,
+        role: 'user',
+        model: activeModel,
+        content,
+        ...(chatSystemPrompt ? { system_prompt: chatSystemPrompt } : {}),
         ...(attachments && attachments.length > 0
-          ? [
-            `• Ekli Dosyalar (${attachments.length} adet): ${attachments.map((a) => `📎 ${a.name}`).join(', ')}`,
-          ]
-          : []),
-      ].join('\n');
+          ? {
+              attachments: attachments.map((a) => ({
+                name: a.name,
+                size: a.size || 0,
+                type: a.type || 'application/octet-stream',
+              })),
+            }
+          : {}),
+      };
 
       const { formattedMarkdown: optimisticFormattedContent } =
         formatOutgoingJsonContent(content, 'user');
@@ -1415,7 +1133,8 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         id: userMsgId,
         role: 'user',
         content: optimisticFormattedContent || content,
-        thinkingContent: optimisticUserThinking,
+        thinkingContent: undefined,
+        rawPayload: optimisticUserRawPayload,
         timestamp: new Date().toISOString(),
         attachments: (attachments || []).map((a, idx) => ({
           id: String(a.id || `att_${requestStartTime}_${idx}`),
@@ -1425,6 +1144,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         })),
         customData: {
           rawCleanContent: content,
+          rawPayload: optimisticUserRawPayload,
         },
       };
 
@@ -1552,7 +1272,6 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           const {
             thinkingText: tagThoughts,
             cleanText,
-            hasUnclosedThink,
           } = extractThinkBlocksFromText(streamedText);
 
           const sReason = streamedReasoning.trim();
@@ -1566,41 +1285,32 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
                   : `${sReason}\n\n${tReason}`
               : sReason || tReason;
 
-          let visibleLiveContent = '';
-          if (showFullTrace) {
-            const liveSections: string[] = [];
-            if (combinedLiveThoughts) {
-              liveSections.push(
-                `:::details [LLM Düşünce & İçsel Muhakeme Süreci ${hasUnclosedThink ? '(Canlı Düşünüyor...)' : '(Chain-of-Thought)'}]\n\`\`\`text\n${combinedLiveThoughts}\n\`\`\`\n:::`
-              );
-            }
-            if (cleanText) {
-              liveSections.push(cleanText);
-            } else if (hasUnclosedThink) {
-              liveSections.push('*(Model düşünce adımlarını tamamlıyor, nihai yanıt hazırlanıyor...)*');
-            }
-            if (streamedToolCalls.length > 0) {
-              liveSections.push(
-                `:::details [Tetiklenen Araç Çağrıları (tool_calls)]\n\`\`\`json\n${JSON.stringify(streamedToolCalls, null, 2)}\n\`\`\`\n:::`
-              );
-            }
-            const rawLen = streamedText.length + streamedReasoning.length;
-            const rawBytes = getUtf8ByteLength(streamedText + streamedReasoning);
-            liveSections.push(
-              `:::details [Canlı LLM Akışı (SSE Stream)]\n\`İstek ID: ${streamedRequestId || 'akışta...'}\` · \`Model: ${activeModel}\` · \`Alınan: ${rawLen} krk (${rawBytes} bayt)\` · \`TTFT: ${ttftMs} ms\` · \`Süre: ${Date.now() - requestStartTime} ms\`\n:::`
-            );
-            visibleLiveContent = liveSections.join('\n\n');
-          } else {
-            visibleLiveContent = cleanText || streamedText;
-          }
+          // Asıl yanıt temiz kalır; ek raporlar, şemalar veya gömülü akordiyonlar eklenmez
+          const visibleLiveContent = cleanText || streamedText;
+
+          // Canlı ham JSON paketi
+          const liveRawPayload: Record<string, any> = {
+            request_id: streamedRequestId || 'streaming',
+            role: 'assistant',
+            model: activeModel,
+            provider: selectedModelObj?.provider || 'Web AI Gateway',
+            content: cleanText || streamedText,
+            ...(combinedLiveThoughts ? { thinking_content: combinedLiveThoughts } : {}),
+            ...(streamedToolCalls.length > 0 ? { tool_calls: streamedToolCalls } : {}),
+            metrics: {
+              ttft_ms: ttftMs,
+              latency_ms: Date.now() - requestStartTime,
+              char_length: streamedText.length,
+            },
+            status: 'streaming',
+          };
 
           const liveAssistantMessage: ChatMessage = {
             id: assistantMsgId,
             role: 'assistant',
             content: visibleLiveContent,
-            thinkingContent:
-              combinedLiveThoughts ||
-              `📡 Canlı Akış | Model: ${activeModel} | Alınan: ${streamedText.length} krk | TTFT: ${ttftMs} ms`,
+            thinkingContent: combinedLiveThoughts || undefined,
+            rawPayload: liveRawPayload,
             timestamp: new Date().toISOString(),
             model: activeModel,
             provider: selectedModelObj?.provider || 'Web AI Gateway',
@@ -1611,6 +1321,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             latencyMs: Date.now() - requestStartTime,
             customData: {
               rawCleanContent: cleanText || streamedText,
+              rawPayload: liveRawPayload,
             },
           };
 
@@ -1635,6 +1346,31 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           );
         };
 
+        // Aktif kullanıcının geçerli API anahtarını çöz
+        const targetUserId = currentUser?.id || activeUserId || 'sys_usr_01';
+        const activeValidKeys = (apiKeys || []).filter(
+          (k) => k.is_active && k.raw_preview && k.raw_preview.trim()
+        );
+        const resolvedApiKey =
+          (apiKey &&
+            apiKey !== 'sk-gw-demo-key-123456' &&
+            activeValidKeys.some((k) => k.raw_preview?.trim() === apiKey.trim()))
+            ? apiKey.trim()
+            : (
+                activeValidKeys.find((k) => k.user_id === targetUserId)?.raw_preview ||
+                activeValidKeys.find((k) => k.user_id === 'sys_usr_01')?.raw_preview ||
+                activeValidKeys[0]?.raw_preview ||
+                ''
+              ).trim();
+
+        if (!resolvedApiKey) {
+          onShowToast(
+            'Geçerli bir API anahtarı bulunamadı. Lütfen "API Anahtarları" sekmesinden yeni bir anahtar oluşturun veya bir anahtar seçin.'
+          );
+          setIsGenerating(false);
+          return;
+        }
+
         await chatService.streamCompletion(
           {
             model: activeModel,
@@ -1643,7 +1379,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             source: 'studio',
             messages: apiMessages,
           },
-          apiKey,
+          resolvedApiKey,
           (delta) => {
             if (stopRequestedRef.current) return;
             if (!ttftMs) {

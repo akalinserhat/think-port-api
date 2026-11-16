@@ -123,6 +123,7 @@ class ChatService:
             and (
                 bool(attachments)
                 or "AKIŞ HAFIZA & SCRIPT HATTI AKTİF" in upper_sys
+                or "AKIŞ HAFIZA & SCRIPT HATTI + BAĞLI DÜĞÜM ARACI AKTİF" in upper_sys
                 or "ARAÇ ÇAĞIRMA" in upper_sys
                 or "ARAÇ ÇAĞIRMAYINIZ" in upper_sys
                 or "SADECE CSV" in upper_sys
@@ -164,6 +165,14 @@ class ChatService:
                             0,
                             ChatMessageDTO(role="system", content=mem_instruction.strip()),
                         )
+
+        # İstek parametresi (skip_observer / gozlemci_devre_disi / gozlemci_aktif_mi) varsa önceliklendir
+        if request.gozlemci_devre_disi is True or request.skip_observer is True:
+            gozlemci_aktif_mi = False
+        elif request.gozlemci_devre_disi is False or request.skip_observer is False:
+            gozlemci_aktif_mi = True
+        elif request.gozlemci_aktif_mi is not None:
+            gozlemci_aktif_mi = bool(request.gozlemci_aktif_mi)
 
         prompt_tokens = self._formatter.estimate_prompt_tokens(request.messages)
         source = (
@@ -565,12 +574,57 @@ class ChatService:
         if is_json_mode:
             return "json"
 
+        stripped = (full_content or "").lstrip()
+        upper_prompts = f"{system_prompt or ''}\n{clean_user_text or ''}".upper()
+
+        # 1. JSON Modu Kontrolü
+        is_json_shaped = (
+            stripped.startswith("{")
+            or stripped.startswith("[")
+            or stripped.startswith("```json")
+        )
+        if is_json_shaped or (not stripped and "SADECE JSON" in upper_prompts):
+            return "json"
+
+        # 2. Kod / Script Tespiti
+        # Eğer içerik veya istem bir programlama kodu/script ise (JavaScript, Python, TypeScript, C#, SQL vb.),
+        # satır sonlarındaki noktalı virgüller (;) veya akış sistem yönergeleri nedeniyle CSV moduna girilmemeli,
+        # 'text' (kod/metin) modunda korunmalıdır.
+        is_code_fence = (
+            stripped.startswith("```")
+            and not stripped.startswith("```csv")
+            and not stripped.startswith("```table")
+        )
+        is_code_prompt = any(
+            kw in upper_prompts
+            for kw in (
+                "SADECE SAF KOD KURALI",
+                "SAF KOD",
+                "SCRIPT DÜĞÜMÜ",
+                "JAVASCRIPT KODU",
+                "PARSEDOCUMENT",
+                "JINT SANDBOX",
+                "KOD BLOĞU",
+            )
+        )
         non_fence_lines = [
             ln.strip()
             for ln in (full_content or "").splitlines()
             if ln.strip() and not ln.strip().startswith("```")
         ]
-        upper_prompts = f"{system_prompt or ''}\n{clean_user_text or ''}".upper()
+        first_ln = non_fence_lines[0] if non_fence_lines else ""
+        is_code_first_line = bool(
+            re.match(
+                r"^(?:function\b|const\b|let\b|var\b|import\b|export\b|class\b|def\b|async\s+function\b|public\b|private\b)",
+                first_ln,
+                re.IGNORECASE,
+            )
+        )
+
+        if is_code_fence or is_code_first_line or (is_code_prompt and not stripped.startswith("#")):
+            return "text"
+
+        # 3. CSV / Tablo Tespiti
         csv_prompt_hint = any(
             kw in upper_prompts
             for kw in (
@@ -583,28 +637,25 @@ class ChatService:
             )
         )
 
-        stripped = (full_content or "").lstrip()
-        is_json_shaped = (
-            stripped.startswith("{")
-            or stripped.startswith("[")
-            or stripped.startswith("```json")
+        has_table_meta = any(
+            ln.upper().startswith("#META") or ln.upper().startswith("#TABLO")
+            for ln in non_fence_lines[:3]
+        )
+        valid_csv_rows = sum(
+            1
+            for ln in non_fence_lines
+            if agent_memory_service.is_valid_csv_data_row(ln)
         )
 
-        if non_fence_lines and not is_json_shaped:
-            first_ln = non_fence_lines[0]
-            semicolon_cnt = sum(1 for ln in non_fence_lines if ";" in ln)
-            if (
-                first_ln.upper().startswith("#META")
-                or first_ln.upper().startswith("#TABLO")
-                or semicolon_cnt >= 2
-                or csv_prompt_hint
-            ):
+        if non_fence_lines:
+            if has_table_meta:
                 return "csv"
-        elif csv_prompt_hint and not is_json_shaped:
+            if valid_csv_rows >= 2:
+                return "csv"
+            if csv_prompt_hint and (valid_csv_rows >= 1 or has_table_meta):
+                return "csv"
+        elif csv_prompt_hint:
             return "csv"
-
-        if is_json_shaped or (not stripped and "SADECE JSON" in upper_prompts):
-            return "json"
 
         return "text"
 
@@ -731,11 +782,26 @@ class ChatService:
                 salvaged_dict, ensure_ascii=False
             )
 
-        should_inspect_tool_call = salvaged_dict is not None and (
-            is_json_truncated
-            or actual_finish_reason == "length"
-            or bool(req_attachments)
-            or len(clean_user_text or "") > 1500
+        _non_batch_lookup_tools = {
+            "erp_rag_search",
+            "erp_get_document_schema",
+            "erp_start_workflow",
+            "erp_navigate",
+        }
+        tc_name_lower = tc_name.lower()
+        is_lookup_tool = (
+            tc_name_lower in _non_batch_lookup_tools
+            or tc_name_lower.startswith(("erp_get_", "erp_list_", "erp_search_", "rag_"))
+        )
+        should_inspect_tool_call = (
+            salvaged_dict is not None
+            and not (is_lookup_tool and not is_json_truncated and actual_finish_reason != "length")
+            and (
+                is_json_truncated
+                or actual_finish_reason == "length"
+                or bool(req_attachments)
+                or len(clean_user_text or "") > 1500
+            )
         )
         if not should_inspect_tool_call or salvaged_dict is None:
             return (tool_calls, added_tokens, reasoning_text, added_traces)
@@ -906,19 +972,26 @@ class ChatService:
             is_json_mode=(output_mode == "json"),
         )
 
+        has_tool_history = False
+        tool_context_chars = 0
+        for m in (root_job.messages or []):
+            if str(getattr(m, "role", "") or "").lower() == "tool":
+                has_tool_history = True
+                tool_context_chars += len(str(getattr(m, "content", "") or ""))
+        total_source_chars = len(clean_user_text or "") + tool_context_chars
         if output_mode in ("csv", "json"):
             should_inspect = (
                 is_truncated
                 or actual_finish_reason == "length"
                 or bool(req_attachments)
-                or len(clean_user_text or "") > 1500
+                or total_source_chars > 1500
             )
         else:
             should_inspect = (
                 is_truncated
                 or actual_finish_reason == "length"
                 or bool(req_attachments)
-                or len(clean_user_text or "") > 2500
+                or (not has_tool_history and len(clean_user_text or "") > 2500)
             )
 
         if not should_inspect:
@@ -929,13 +1002,22 @@ class ChatService:
             response_format=root_job.response_format,
             merge_system_into_user=False,
         )
-        base_text_messages = [
-            ChatMessageDTO(
-                role=str(m.get("role") or "user"),
-                content=str(m.get("content") or ""),
+        base_text_messages: List[ChatMessageDTO] = []
+        for idx_msg, m in enumerate(prepared_orig.text_only_messages):
+            orig_m = (
+                root_job.messages[idx_msg]
+                if root_job.messages and idx_msg < len(root_job.messages)
+                else None
             )
-            for m in prepared_orig.text_only_messages
-        ]
+            base_text_messages.append(
+                ChatMessageDTO(
+                    role=str(m.get("role") or "user"),
+                    content=str(m.get("content") or ""),
+                    name=getattr(orig_m, "name", None) if orig_m else None,
+                    tool_call_id=getattr(orig_m, "tool_call_id", None) if orig_m else None,
+                    tool_calls=getattr(orig_m, "tool_calls", None) if orig_m else None,
+                )
+            )
         internal_ctx = self._build_internal_continuation_user_ctx(current_job, user_ctx)
 
         # --- MOD 1: CSV / Noktalı Virgüllü Tablo Denetimi ve Tamamlama ---
@@ -948,245 +1030,256 @@ class ChatService:
                     full_content, prep_finish_mode
                 )
             )
-            if actual_finish_reason == "length":
-                initial_dropped_row = dropped_cand
-            full_content = clean_pref
-
-            clean_initial_prefix = full_content
-            total_added_csv_rows = 0
-            combined_usr_text_for_zoom = "\n\n".join(
-                str(m.get("content") or "")
-                for m in prepared_orig.text_only_messages
-                if m.get("role", "user") == "user"
-            ).strip()
-
-            for obs_step in range(1, 7):
-                active_csv_hdr, active_csv_cols = (
-                    agent_memory_service.detect_csv_header_info(full_content or "")
+            if not clean_pref.strip() and bool(full_content and full_content.strip()):
+                gateway_logger.warning(
+                    f"OBSERVER_CSV_FALSE_POSITIVE | id={current_job.job_id} | "
+                    f"CSV temizleme tüm içeriği ({len(full_content)} krk) sildi; "
+                    "çıktı gerçek bir CSV tablosu olmadığı için mod 'text' olarak değiştirilip orijinal içerik korundu."
                 )
-                active_csv_schema = active_csv_hdr or "Kod;Tutar"
-                current_csv_rows = [
-                    ln.strip()
-                    for ln in (full_content or "").splitlines()
-                    if agent_memory_service.is_valid_csv_data_row(
-                        ln, expected_cols=active_csv_cols
+                output_mode = "text"
+            else:
+                if actual_finish_reason == "length":
+                    initial_dropped_row = dropped_cand
+                full_content = clean_pref
+
+                clean_initial_prefix = full_content
+                total_added_csv_rows = 0
+                combined_usr_text_for_zoom = "\n\n".join(
+                    str(m.get("content") or "")
+                    for m in prepared_orig.text_only_messages
+                    if m.get("role", "user") in ("user", "tool")
+                ).strip()
+
+                for obs_step in range(1, 7):
+                    active_csv_hdr, active_csv_cols = (
+                        agent_memory_service.detect_csv_header_info(full_content or "")
                     )
-                ]
-                effective_cut_tail = csv_cut_off_tail or trunc_reason
-                needs_cont, obs_reason, cont_directive, obs_was_truncated = (
-                    await asyncio.to_thread(
-                        agent_memory_service.evaluate_with_observer_agent,
-                        self._llm_provider,
-                        self._model_service,
-                        prepared_orig.text_only_messages,
-                        full_content or "",
-                        None,
-                        None,
-                        is_truncated,
-                        effective_cut_tail,
-                        "csv",
+                    active_csv_schema = active_csv_hdr or "Kod;Tutar"
+                    current_csv_rows = [
+                        ln.strip()
+                        for ln in (full_content or "").splitlines()
+                        if agent_memory_service.is_valid_csv_data_row(
+                            ln, expected_cols=active_csv_cols
+                        )
+                    ]
+                    effective_cut_tail = csv_cut_off_tail or trunc_reason
+                    needs_cont, obs_reason, cont_directive, obs_was_truncated = (
+                        await asyncio.to_thread(
+                            agent_memory_service.evaluate_with_observer_agent,
+                            self._llm_provider,
+                            self._model_service,
+                            prepared_orig.text_only_messages,
+                            full_content or "",
+                            None,
+                            None,
+                            is_truncated,
+                            effective_cut_tail,
+                            "csv",
+                        )
                     )
-                )
-                gateway_logger.info(
-                    f"OBSERVER_INSPECTION | id={current_job.job_id} | step={obs_step} | mode=csv "
-                    f"| app={current_job.app_id} | agent={current_job.agent_id} "
-                    f"| rows={len(current_csv_rows)} | truncated={is_truncated} "
-                    f"| cut_hint={csv_cut_off_tail[:80] if csv_cut_off_tail else '-'} "
-                    f"| needs_continuation={needs_cont} | obs_truncated={obs_was_truncated} | reason={obs_reason}"
-                )
-                obs_trace_line = (
-                    f"🛡️ [GOZLEMCI_AJAN DENETİMİ (Tur {obs_step} - CSV)]: "
-                    f"Mevcut Satır={len(current_csv_rows)} | Kesinti={is_truncated} "
-                    f"| Devam Gerekli Mi={needs_cont} | Neden={obs_reason}"
-                )
-                added_traces.append(obs_trace_line)
-                reasoning_text = (
-                    f"{reasoning_text}\n\n{obs_trace_line}".strip()
-                    if reasoning_text
-                    else obs_trace_line
-                )
-
-                if not needs_cont:
                     gateway_logger.info(
-                        f"OBSERVER_CSV_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} "
-                        f"| total_rows={len(current_csv_rows)}"
+                        f"OBSERVER_INSPECTION | id={current_job.job_id} | step={obs_step} | mode=csv "
+                        f"| app={current_job.app_id} | agent={current_job.agent_id} "
+                        f"| rows={len(current_csv_rows)} | truncated={is_truncated} "
+                        f"| cut_hint={csv_cut_off_tail[:80] if csv_cut_off_tail else '-'} "
+                        f"| needs_continuation={needs_cont} | obs_truncated={obs_was_truncated} | reason={obs_reason}"
                     )
-                    break
-
-                cont_non_fence = [
-                    ln.strip()
-                    for ln in (cont_directive or "").splitlines()
-                    if ln.strip() and not ln.strip().startswith("```")
-                ]
-                has_direct_csv_lines = any(
-                    agent_memory_service.is_valid_csv_data_row(
-                        re.sub(r"^(?:#?\d+[\.\)\:\-\s]+|\-\s+|\*\s+)", "", ln).strip(),
-                        expected_cols=2,
+                    obs_trace_line = (
+                        f"🛡️ [GOZLEMCI_AJAN DENETİMİ (Tur {obs_step} - CSV)]: "
+                        f"Mevcut Satır={len(current_csv_rows)} | Kesinti={is_truncated} "
+                        f"| Devam Gerekli Mi={needs_cont} | Neden={obs_reason}"
                     )
-                    or (ln.startswith("#") and "=" in ln)
-                    for ln in cont_non_fence
-                )
-
-                if has_direct_csv_lines:
-                    cont_to_merge = "\n".join(cont_non_fence)
-                    next_cut_fragment = ""
-                    if obs_was_truncated and len(cont_non_fence) >= 2:
-                        # GOZLEMCI_AJAN token sınırına çarptıysa son satırı ipucu olarak sakla ve birleştirmeden ayır
-                        next_cut_fragment = cont_non_fence[-1]
-                        cont_to_merge = "\n".join(cont_non_fence[:-1])
-
-                    merged_csv, direct_added = agent_memory_service.merge_csv_continuation(
-                        full_content, cont_to_merge
+                    added_traces.append(obs_trace_line)
+                    reasoning_text = (
+                        f"{reasoning_text}\n\n{obs_trace_line}".strip()
+                        if reasoning_text
+                        else obs_trace_line
                     )
-                    if direct_added > 0:
-                        full_content = merged_csv
-                        total_added_csv_rows += direct_added
-                        added_tokens += DocumentService.estimate_tokens(cont_to_merge)
-                        is_truncated = obs_was_truncated
-                        csv_cut_off_tail = next_cut_fragment
-                        trunc_reason = "observer_output_length" if obs_was_truncated else ""
-                        _, updated_cols = agent_memory_service.detect_csv_header_info(
-                            full_content
-                        )
-                        updated_row_cnt = sum(
-                            1
-                            for ln in full_content.splitlines()
-                            if agent_memory_service.is_valid_csv_data_row(
-                                ln, expected_cols=updated_cols
-                            )
-                        )
-                        gateway_logger.info(
-                            f"OBSERVER_CSV_DIRECT_MERGED | id={current_job.job_id} | step={obs_step} "
-                            f"| added_rows={direct_added} | total_rows={updated_row_cnt} "
-                            f"| obs_truncated={obs_was_truncated}"
-                        )
-                        continue
-                    if not obs_was_truncated:
+
+                    if not needs_cont:
                         gateway_logger.info(
                             f"OBSERVER_CSV_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} "
-                            f"| reason=all_rows_already_present | total_rows={len(current_csv_rows)}"
+                            f"| total_rows={len(current_csv_rows)}"
                         )
                         break
 
-                # Yedek yol: GOZLEMCI_AJAN doğrudan CSV satırı yerine metinsel yönerge döndürdüyse (veya fiziksel kesinti override devreye girdiyse)
-                last_row = current_csv_rows[-1] if current_csv_rows else ""
-                last_code = last_row.split(";", 1)[0].strip() if ";" in last_row else ""
-                prev_codes = [
-                    ln.split(";", 1)[0].strip()
-                    for ln in current_csv_rows[-4:-1]
-                    if ";" in ln
-                ]
-                zoom_window = (
-                    agent_memory_service.extract_post_anchor_document_window(
-                        document_text=combined_usr_text_for_zoom,
-                        anchor_code=last_code,
-                        prev_codes=prev_codes,
-                    )
-                    if last_code
-                    else ""
-                )
-                zoom_block = (
-                    f"\n\n[SON ÇIKARILAN KOD (`{last_code}`) ETRAFINDAKİ ODAKLANMIŞ BELGE KESİTİ]:\n{zoom_window}"
-                    if zoom_window
-                    else ""
-                )
-                cut_hint_block = (
-                    f"\nToken sınırında yarıda kesilen ve henüz listeye eklenmeyen satır parçası: `{csv_cut_off_tail}`."
-                    if csv_cut_off_tail
-                    else ""
-                )
-                fallback_instruction = (
-                    f"[GOZLEMCI_AJAN DEVAM YÖNERGESİ (Tur {obs_step})]\n"
-                    f"{cont_directive or 'Tablo çıktısı token sınırında yarıda kesildi; kaldığın satırdan devam et.'}\n"
-                    + (
-                        f"\nSon tamamlanan satır: `{last_row}`.{cut_hint_block}\n"
-                        f"Önceki {len(current_csv_rows)} satırı, `#META`/`#TABLOLAR` satırlarını veya sütun başlığını TEKRAR YAZMADAN yalnızca `{last_code}` satırından hemen sonra gelen (kapsam dışı tablo başlığından önceki) kalan hedef satırları `{active_csv_schema}` formatında yaz.{zoom_block}"
-                        if last_row
-                        else f"Belgedeki yalnızca talep edilen hedef tablolarda yer alan satırları `#META` ve sütun başlığıyla birlikte `{active_csv_schema}` formatında yaz."
-                    )
-                )
-                cont_messages = (
-                    list(base_text_messages)
-                    + [
-                        ChatMessageDTO(role="assistant", content=full_content),
-                        ChatMessageDTO(role="user", content=fallback_instruction),
-                    ]
-                    if full_content
-                    else list(base_text_messages)
-                    + [ChatMessageDTO(role="user", content=fallback_instruction)]
-                )
-                cont_req = ChatCompletionRequestDTO(
-                    model=current_job.requested_model or current_job.model,
-                    messages=cont_messages,
-                    tools=None,
-                    tool_choice="none",
-                    stream=False,
-                    temperature=0.0,
-                    max_tokens=current_job.max_tokens,
-                    conversation_id=current_job.conversation_id,
-                    source="api",
-                    app_id=current_job.app_id,
-                    agent_id=current_job.agent_id,
-                )
-                cont_job = self.initiate_chat_job(cont_req, internal_ctx)
-                try:
-                    cont_content, cont_tokens, _, _, _, cont_reasoning = (
-                        await self._collect_full_response(cont_job)
-                    )
-                except Exception as cont_exc:
-                    gateway_logger.warning(
-                        f"OBSERVER_CSV_FALLBACK_ERROR | id={current_job.job_id} | step={obs_step} | exc={cont_exc}"
-                    )
-                    break
-
-                cont_finish_reason = self._job_finish_reasons.pop(cont_job.job_id, "stop")
-                added_tokens += cont_tokens
-                if cont_reasoning:
-                    reasoning_text = (
-                        f"{reasoning_text}\n\n{cont_reasoning}".strip()
-                        if reasoning_text
-                        else cont_reasoning
-                    )
-                if not cont_content or not cont_content.strip():
-                    break
-
-                chunk_to_merge = cont_content
-                next_fallback_cut = ""
-                if cont_finish_reason == "length":
-                    cont_lines = [
+                    cont_non_fence = [
                         ln.strip()
-                        for ln in cont_content.splitlines()
+                        for ln in (cont_directive or "").splitlines()
                         if ln.strip() and not ln.strip().startswith("```")
                     ]
-                    if len(cont_lines) >= 2:
-                        next_fallback_cut = cont_lines.pop()
-                        chunk_to_merge = "\n".join(cont_lines)
+                    has_direct_csv_lines = (
+                        obs_reason != "truncated_output_fallback"
+                        and any(
+                            agent_memory_service.is_valid_csv_data_row(
+                                re.sub(r"^(?:#?\d+[\.\)\:\-\s]+|\-\s+|\*\s+)", "", ln).strip(),
+                                expected_cols=2,
+                            )
+                            or (ln.startswith("#") and "=" in ln)
+                            for ln in cont_non_fence
+                        )
+                    )
 
-                full_content, added_csv_rows = agent_memory_service.merge_csv_continuation(
-                    full_content, chunk_to_merge
-                )
-                total_added_csv_rows += added_csv_rows
-                csv_cut_off_tail = next_fallback_cut
-                is_truncated, trunc_reason = agent_memory_service.detect_response_truncation(
-                    content=full_content,
-                    finish_reason=cont_finish_reason,
-                    is_json_mode=False,
-                )
-                if added_csv_rows == 0:
-                    break
+                    if has_direct_csv_lines:
+                        cont_to_merge = "\n".join(cont_non_fence)
+                        next_cut_fragment = ""
+                        if obs_was_truncated and len(cont_non_fence) >= 2:
+                            # GOZLEMCI_AJAN token sınırına çarptıysa son satırı ipucu olarak sakla ve birleştirmeden ayır
+                            next_cut_fragment = cont_non_fence[-1]
+                            cont_to_merge = "\n".join(cont_non_fence[:-1])
 
-            if total_added_csv_rows == 0 and initial_dropped_row:
-                full_content, _ = agent_memory_service.merge_csv_continuation(
-                    full_content, initial_dropped_row
-                )
+                        merged_csv, direct_added = agent_memory_service.merge_csv_continuation(
+                            full_content, cont_to_merge
+                        )
+                        if direct_added > 0:
+                            full_content = merged_csv
+                            total_added_csv_rows += direct_added
+                            added_tokens += DocumentService.estimate_tokens(cont_to_merge)
+                            is_truncated = True
+                            csv_cut_off_tail = next_cut_fragment
+                            trunc_reason = "observer_output_length" if obs_was_truncated else "observer_direct_merge"
+                            _, updated_cols = agent_memory_service.detect_csv_header_info(
+                                full_content
+                            )
+                            updated_row_cnt = sum(
+                                1
+                                for ln in full_content.splitlines()
+                                if agent_memory_service.is_valid_csv_data_row(
+                                    ln, expected_cols=updated_cols
+                                )
+                            )
+                            gateway_logger.info(
+                                f"OBSERVER_CSV_DIRECT_MERGED | id={current_job.job_id} | step={obs_step} "
+                                f"| added_rows={direct_added} | total_rows={updated_row_cnt} "
+                                f"| obs_truncated={obs_was_truncated}"
+                            )
+                            continue
+                        if not obs_was_truncated:
+                            gateway_logger.info(
+                                f"OBSERVER_CSV_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} "
+                                f"| reason=all_rows_already_present | total_rows={len(current_csv_rows)}"
+                            )
+                            break
 
-            return (
-                full_content,
-                added_tokens,
-                reasoning_text,
-                added_traces,
-                clean_initial_prefix,
-            )
+                    # Yedek yol: GOZLEMCI_AJAN doğrudan CSV satırı yerine metinsel yönerge döndürdüyse (veya fiziksel kesinti override devreye girdiyse)
+                    last_row = current_csv_rows[-1] if current_csv_rows else ""
+                    last_code = last_row.split(";", 1)[0].strip() if ";" in last_row else ""
+                    prev_codes = [
+                        ln.split(";", 1)[0].strip()
+                        for ln in current_csv_rows[-4:-1]
+                        if ";" in ln
+                    ]
+                    zoom_window = (
+                        agent_memory_service.extract_post_anchor_document_window(
+                            document_text=combined_usr_text_for_zoom,
+                            anchor_code=last_code,
+                            prev_codes=prev_codes,
+                        )
+                        if last_code
+                        else ""
+                    )
+                    zoom_block = (
+                        f"\n\n[SON ÇIKARILAN KOD (`{last_code}`) ETRAFINDAKİ ODAKLANMIŞ BELGE KESİTİ]:\n{zoom_window}"
+                        if zoom_window
+                        else ""
+                    )
+                    cut_hint_block = (
+                        f"\nToken sınırında yarıda kesilen ve henüz listeye eklenmeyen satır parçası: `{csv_cut_off_tail}`."
+                        if csv_cut_off_tail
+                        else ""
+                    )
+                    fallback_instruction = (
+                        f"[GOZLEMCI_AJAN DEVAM YÖNERGESİ (Tur {obs_step})]\n"
+                        f"{cont_directive or 'Tablo çıktısı token sınırında yarıda kesildi; kaldığın satırdan devam et.'}\n"
+                        + (
+                            f"\nSon tamamlanan satır: `{last_row}`.{cut_hint_block}\n"
+                            f"Önceki {len(current_csv_rows)} satırı, `#META`/`#TABLOLAR` satırlarını veya sütun başlığını TEKRAR YAZMADAN yalnızca `{last_code}` satırından hemen sonra gelen (kapsam dışı tablo başlığından önceki) kalan hedef satırları `{active_csv_schema}` formatında yaz.{zoom_block}"
+                            if last_row
+                            else f"Belgedeki yalnızca talep edilen hedef tablolarda yer alan satırları `#META` ve sütun başlığıyla birlikte `{active_csv_schema}` formatında yaz."
+                        )
+                    )
+                    cont_messages = (
+                        list(base_text_messages)
+                        + [
+                            ChatMessageDTO(role="assistant", content=full_content),
+                            ChatMessageDTO(role="user", content=fallback_instruction),
+                        ]
+                        if full_content
+                        else list(base_text_messages)
+                        + [ChatMessageDTO(role="user", content=fallback_instruction)]
+                    )
+                    cont_req = ChatCompletionRequestDTO(
+                        model=current_job.requested_model or current_job.model,
+                        messages=cont_messages,
+                        tools=None,
+                        tool_choice="none",
+                        stream=False,
+                        temperature=0.0,
+                        max_tokens=current_job.max_tokens,
+                        conversation_id=current_job.conversation_id,
+                        source="api",
+                        app_id=current_job.app_id,
+                        agent_id=current_job.agent_id,
+                    )
+                    cont_job = self.initiate_chat_job(cont_req, internal_ctx)
+                    try:
+                        cont_content, cont_tokens, _, _, _, cont_reasoning = (
+                            await self._collect_full_response(cont_job)
+                        )
+                    except Exception as cont_exc:
+                        gateway_logger.warning(
+                            f"OBSERVER_CSV_FALLBACK_ERROR | id={current_job.job_id} | step={obs_step} | exc={cont_exc}"
+                        )
+                        break
+
+                    cont_finish_reason = self._job_finish_reasons.pop(cont_job.job_id, "stop")
+                    added_tokens += cont_tokens
+                    if cont_reasoning:
+                        reasoning_text = (
+                            f"{reasoning_text}\n\n{cont_reasoning}".strip()
+                            if reasoning_text
+                            else cont_reasoning
+                        )
+                    if not cont_content or not cont_content.strip():
+                        break
+
+                    chunk_to_merge = cont_content
+                    next_fallback_cut = ""
+                    if cont_finish_reason == "length":
+                        cont_lines = [
+                            ln.strip()
+                            for ln in cont_content.splitlines()
+                            if ln.strip() and not ln.strip().startswith("```")
+                        ]
+                        if len(cont_lines) >= 2:
+                            next_fallback_cut = cont_lines.pop()
+                            chunk_to_merge = "\n".join(cont_lines)
+
+                    full_content, added_csv_rows = agent_memory_service.merge_csv_continuation(
+                        full_content, chunk_to_merge
+                    )
+                    total_added_csv_rows += added_csv_rows
+                    csv_cut_off_tail = next_fallback_cut
+                    is_truncated, trunc_reason = agent_memory_service.detect_response_truncation(
+                        content=full_content,
+                        finish_reason=cont_finish_reason,
+                        is_json_mode=False,
+                    )
+                    if added_csv_rows == 0:
+                        break
+
+                if total_added_csv_rows == 0 and initial_dropped_row:
+                    full_content, _ = agent_memory_service.merge_csv_continuation(
+                        full_content, initial_dropped_row
+                    )
+
+                return (
+                    full_content,
+                    added_tokens,
+                    reasoning_text,
+                    added_traces,
+                    clean_initial_prefix,
+                )
 
         # --- MOD 2 & 3: Yapılandırılmış JSON ve Genel Metin / Markdown / Kod Denetimi ---
         clean_initial_prefix = full_content

@@ -5,10 +5,14 @@ from app.dtos.user_dto import CreateUserRequestDTO, UserResponseDTO
 from app.repositories.postgres_cli_bridge import (
     authenticate_system_user,
     create_system_user,
+    create_user_token_allocation,
     delete_system_user,
+    delete_user_token_allocation,
     list_system_users,
+    list_user_token_allocations,
     toggle_system_user_status,
     update_system_user,
+    update_user_token_allocation,
 )
 from app.services.user_service import UserService
 
@@ -83,4 +87,42 @@ async def login_admin_system_user(body: Dict[str, Any]) -> Dict[str, Any]:
     res = authenticate_system_user(body)
     if not res.get("authenticated"):
         raise HTTPException(status_code=401, detail=res.get("error", "Giriş başarısız."))
+    return res
+
+
+@router.get("/{user_id}/tokens")
+async def get_user_tokens(user_id: str) -> List[Dict[str, Any]]:
+    """Kullanıcının tarih aralıklı token tanımlamalarını ve kullanım dökümlerini listeler."""
+    return list_user_token_allocations(user_id)
+
+
+@router.post("/{user_id}/tokens")
+async def create_user_token(user_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Kullanıcıya yeni bir tarih aralıklı token kotası tanımı ekler."""
+    res = create_user_token_allocation(user_id, body)
+    if "error" in res:
+        status_code = 404 if "bulunamadı" in str(res["error"]).lower() else 400
+        raise HTTPException(status_code=status_code, detail=res["error"])
+    return res
+
+
+@router.patch("/{user_id}/tokens/{allocation_id}")
+async def update_user_token(
+    user_id: str, allocation_id: str, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Kullanıcının mevcut bir token tanımını günceller."""
+    res = update_user_token_allocation(user_id, allocation_id, body)
+    if "error" in res:
+        status_code = 404 if "bulunamadı" in str(res["error"]).lower() else 400
+        raise HTTPException(status_code=status_code, detail=res["error"])
+    return res
+
+
+@router.delete("/{user_id}/tokens/{allocation_id}")
+async def remove_user_token(user_id: str, allocation_id: str) -> Dict[str, Any]:
+    """Kullanıcının mevcut bir token tanımını siler."""
+    res = delete_user_token_allocation(user_id, allocation_id)
+    if "error" in res:
+        status_code = 404 if "bulunamadı" in str(res["error"]).lower() else 400
+        raise HTTPException(status_code=status_code, detail=res["error"])
     return res

@@ -6,12 +6,16 @@ HTTP/SSE akışını, yedek (fallback) geçişlerini ve tool_calls ayrıştırma
 import http.client
 import json
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from app.core.config import settings
 from app.core.logger import gateway_logger
 from app.core.security import create_verified_ssl_context
 from app.services.message_formatter_service import MessageFormatterService
+
+# Pollinations Classic Web API aynı IP'den eşzamanlı tek istek kabul ettiği için seri kilit
+_POLLINATIONS_CLASSIC_LOCK = threading.RLock()
 
 
 class LlmProviderService:
@@ -256,7 +260,7 @@ class LlmProviderService:
                     temperature=temperature,
                     tools=tools,
                     tool_choice=effective_tool_choice,
-                    max_tokens=None,
+                    max_tokens=max_tokens,
                     seed=((int(time.time() * 1000) + seed_offset) % 900000) + 100000,
                     force_stream=True,
                 )
@@ -349,7 +353,8 @@ class LlmProviderService:
             finally:
                 conn.close()
 
-        ok = _execute_single_pollinations_call(openai_messages, on_tool_calls, on_delta)
+        with _POLLINATIONS_CLASSIC_LOCK:
+            ok = _execute_single_pollinations_call(openai_messages, on_tool_calls, on_delta)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         gateway_logger.info(
             f"Web AI (/openai) akışı tamamlandı | istem={requested_model_id} | upstream={model_name} "
@@ -494,7 +499,11 @@ class LlmProviderService:
                 flattened.append(
                     {
                         "role": "user",
-                        "content": f"[ARAÇ ÇALIŞTIRMA SONUCU ({tool_name})]:\n{tool_content}",
+                        "content": (
+                            f"[ARAÇ ÇALIŞTIRMA SONUCU ({tool_name})]:\n{tool_content}\n\n"
+                            "[SİSTEM NOTU: Yukarıdaki araç çıktısı başarıyla alındı. Aynı parametrelerle aynı aracı "
+                            "tekrar ÇAĞIRMAYINIZ; gerekli veriler tamamlandıysa doğrudan nihai yanıtı üretiniz.]"
+                        ),
                     }
                 )
             else:

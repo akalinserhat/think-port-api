@@ -14,11 +14,24 @@ from app.services.rag_document_service import rag_document_service
 router = APIRouter(prefix="/v1/rag", tags=["PostgreSQL pgvector RAG"])
 
 
+class RagPredefinedChunkDTO(BaseModel):
+    """Webakus RAG-CHUNK-UZMANI ajanı tarafından belirlenmiş parça tanımı."""
+    section_title: str = Field(default="", description="Bölüm veya tablo başlığı")
+    page_number: int = Field(default=1, description="Sayfa numarası (1 tabanlı)")
+    chunk_index: int = Field(default=0, description="Parça sıra indeksi (0 tabanlı)")
+    content: str = Field(..., description="Parça metin içeriği")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Ek meta veriler")
+
+
 class RagIngestRequestDTO(BaseModel):
     """Bulut dökümanını PostgreSQL (pgvector) RAG veritabanına aktarma isteği."""
     file_name: str = Field(..., description="Dosya adı (örn: Fiyat_Listesi.pdf)")
     base64_data: Optional[str] = Field(default=None, description="Base64 kodlu ham dosya içeriği")
     extracted_text: Optional[str] = Field(default=None, description="Önceden çıkarılmış metin varsa")
+    chunks: Optional[List[RagPredefinedChunkDTO]] = Field(
+        default=None,
+        description="Webakus AdminUI RAG-CHUNK-UZMANI ajanı tarafından önceden oluşturulmuş chunk parçaları",
+    )
     app_id: str = Field(default="WEBAKUS_ERP", description="Uygulama kimliği")
     firma_id: int = Field(default=0, description="Firma ID")
     user_id: str = Field(default="", description="Yükleyen kullanıcı ID")
@@ -31,6 +44,14 @@ class RagIngestRequestDTO(BaseModel):
     mime_type: str = Field(default="", description="Dosya MIME tipi")
     file_size: int = Field(default=0, description="Dosya boyutu (bayt)")
     conversation_id: str = Field(default="", description="Opsiyonel sohbet oturumu ID'si")
+    async_mode: bool = Field(
+        default=False,
+        description="True ise indekslemeyi arka planda başlatıp anında 'indexing' durumunu döner",
+    )
+    use_chunk_agent: bool = Field(
+        default=False,
+        description="Varsayılan olarak False; doğrudan yapısal ve semantik parçalama kullanılır",
+    )
 
 
 class RagDeleteRequestDTO(BaseModel):
@@ -54,7 +75,7 @@ class RagRenameRequestDTO(BaseModel):
 
 class RagSearchRequestDTO(BaseModel):
     """PostgreSQL pgvector hibrit RAG arama isteği."""
-    query: str = Field(..., description="Aranacak soru, ürün kodu, başlık veya anahtar kelime")
+    query: str = Field(default="tablo", description="Aranacak soru, ürün kodu, başlık veya anahtar kelime")
     app_id: str = Field(default="WEBAKUS_ERP")
     firma_id: Optional[int] = Field(default=None)
     bulut_dosya_id: Optional[int] = Field(default=None)
@@ -66,19 +87,24 @@ class RagSearchRequestDTO(BaseModel):
     min_score: Optional[float] = Field(default=None, ge=0.0, le=0.95)
     preserve_table_order: bool = Field(default=True)
     top_k: int = Field(default=8, ge=1, le=25)
+    start_chunk_index: Optional[int] = Field(default=None, ge=0, description="Ardışık tablo parçaları için başlangıç chunk_index (0 tabanlı)")
+    end_chunk_index: Optional[int] = Field(default=None, ge=0, description="Ardışık tablo parçaları için bitiş chunk_index (dahil)")
 
 
 @router.post("/documents/ingest")
 def ingest_cloud_document(payload: RagIngestRequestDTO) -> Dict[str, Any]:
     """
     Buluta yüklenen dökümanı (.pdf, .doc, .docx, .xlsx, .csv, .txt, .md vb.)
-    otomatik olarak metne çözümler, parçalara (chunk) ayırır ve PostgreSQL `pgvector`
-    RAG tablolarına (`rag_cloud_documents` & `rag_document_chunks`) kaydeder.
+    otomatik olarak metne çözümler, `RAG-CHUNK-UZMANI` ajanı ile bölüm/parçalara (chunk) ayırır
+    ve PostgreSQL `pgvector` RAG tablolarına (`rag_cloud_documents` & `rag_document_chunks`) kaydeder.
+    `async_mode=True` ise indekslemeyi arka planda başlatıp anında durum bilgisi döner.
     """
-    return rag_document_service.ingest_cloud_document(
+    raw_chunks = [c.model_dump() for c in payload.chunks] if payload.chunks else None
+    ingest_kwargs = dict(
         file_name=payload.file_name,
         base64_data=payload.base64_data,
         extracted_text=payload.extracted_text,
+        chunks=raw_chunks,
         app_id=payload.app_id,
         firma_id=payload.firma_id,
         user_id=payload.user_id,
@@ -91,7 +117,11 @@ def ingest_cloud_document(payload: RagIngestRequestDTO) -> Dict[str, Any]:
         mime_type=payload.mime_type,
         file_size=payload.file_size,
         conversation_id=payload.conversation_id,
+        use_chunk_agent=payload.use_chunk_agent if raw_chunks is None else False,
     )
+    if payload.async_mode:
+        return rag_document_service.start_async_ingest(**ingest_kwargs)
+    return rag_document_service.ingest_cloud_document(**ingest_kwargs)
 
 
 @router.delete("/documents")
@@ -181,6 +211,35 @@ def list_cloud_documents(
     }
 
 
+@router.get("/documents/status")
+def get_cloud_documents_status(
+    bulut_dosya_ids: str = Query(..., description="Virgülle ayrılmış BulutDosya ID listesi (örn: 66,67)"),
+    app_id: str = Query(default="WEBAKUS_ERP"),
+    firma_id: Optional[int] = Query(default=None),
+) -> Dict[str, Any]:
+    """Belirtilen bulut dosya ID'leri için anlık RAG indeksleme durumunu (indexing / indexed / failed / not_indexed) döner."""
+    parsed_ids: List[int] = []
+    for raw_part in (bulut_dosya_ids or "").split(","):
+        clean_part = raw_part.strip()
+        if not clean_part:
+            continue
+        try:
+            num = int(clean_part)
+            if num > 0 and num not in parsed_ids:
+                parsed_ids.append(num)
+        except ValueError:
+            continue
+    statuses = rag_document_service.get_documents_status(
+        bulut_dosya_ids=parsed_ids,
+        firma_id=firma_id,
+        app_id=app_id,
+    )
+    return {
+        "total": len(statuses),
+        "statuses": statuses,
+    }
+
+
 @router.get("/documents/by-bulut-id/{bulut_dosya_id}")
 def get_cloud_document_by_bulut_id(
     bulut_dosya_id: int,
@@ -216,6 +275,8 @@ def search_cloud_documents(payload: RagSearchRequestDTO) -> Dict[str, Any]:
         min_score=payload.min_score,
         preserve_table_order=payload.preserve_table_order,
         top_k=payload.top_k,
+        start_chunk_index=payload.start_chunk_index,
+        end_chunk_index=payload.end_chunk_index,
     )
 
 

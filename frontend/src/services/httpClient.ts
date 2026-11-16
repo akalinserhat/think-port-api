@@ -6,7 +6,13 @@
 export async function extractHttpErrorMessage(res: Response): Promise<string> {
   try {
     const errJson = await res.json();
-    return errJson.detail?.error?.message || errJson.detail || JSON.stringify(errJson);
+    return (
+      errJson.error?.message ||
+      errJson.detail?.error?.message ||
+      (typeof errJson.detail === 'string' ? errJson.detail : null) ||
+      errJson.message ||
+      JSON.stringify(errJson)
+    );
   } catch {
     return `HTTP ${res.status}`;
   }

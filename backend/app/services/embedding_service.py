@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.error
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 from app.core.config import settings
 from app.core.logger import gateway_logger
 from app.core.security import create_verified_ssl_context
@@ -36,6 +37,8 @@ from app.repositories.telemetry_repository import SettingsRepository
 
 BGE_M3_MODEL_ID = "BAAI/bge-m3"
 BGE_M3_DIMENSIONS = 1024
+RAG_VECTOR_AGENT_CODE = "RAG-VEKTOR-UZMANI"
+VECTOR_AGENT_CACHE_TTL_SEC = 15.0
 MAX_BGE_M3_INPUT_CHARS = 24000  # ~8192 token güvenli karakter sınırı
 DEFAULT_BATCH_SIZE = 64
 HF_SPACE_BATCH_SIZE = 10  # HF Space FastAPI sınırı: "Max 10 texts per request"
@@ -67,6 +70,9 @@ class EmbeddingService:
         self._last_active_provider: str = ""
         self._last_latency_ms: int = 0
         self._last_proxy_telemetry: Dict[str, Any] = {}
+        self._provider_cooldown_until: Dict[str, float] = {}
+        self._agent_cfg_cache: Optional[Dict[str, Any]] = None
+        self._agent_cfg_cached_at: float = 0.0
 
     @staticmethod
     def normalize_vector_1024(raw_vec: Sequence[float]) -> List[float]:
@@ -128,12 +134,218 @@ class EmbeddingService:
         vec[0] = 1.0
         return vec
 
-    def _get_live_config(self) -> Dict[str, Any]:
-        """PostgreSQL `system_settings` ve ortam değişkenlerinden güncel sağlayıcı anahtarlarını okur."""
-        dto = self._settings_repo.get_settings()
+    @staticmethod
+    def _resolve_provider_from_agent_row(
+        saglayici_turu: Any,
+        saglayici_adi: Optional[str],
+        base_url: Optional[str],
+    ) -> str:
+        """Webakus `AiSaglayicilar` kaydını ThinkPort embedding sağlayıcı anahtarına eşler."""
+        name_l = str(saglayici_adi or "").strip().lower()
+        url_l = str(base_url or "").strip().lower()
+        try:
+            turu_int = int(saglayici_turu or 0)
+        except Exception:
+            turu_int = 0
+
+        if turu_int == 4 or "ollama" in name_l or "11434" in url_l:
+            return "ollama"
+        if "siliconflow" in name_l or "siliconflow" in url_l:
+            return "siliconflow"
+        if "cloudflare" in name_l or "cloudflare" in url_l:
+            return "cloudflare"
+        if "huggingface" in name_l or "hf-inference" in url_l:
+            return "huggingface"
+        if "hf.space" in url_l or "hf-space" in name_l:
+            return "hf-space"
+        if "openrouter" in name_l or "openrouter" in url_l:
+            return "openrouter"
+        if "deepinfra" in name_l or "deepinfra" in url_l:
+            return "deepinfra"
+        return "ollama"
+
+    def _load_vector_agent_config(self, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Öncelikle `thinkport_db.ai_agents` teknik ajan tablosundan, bulunamazsa `webakus_db."AiAjanlar"`
+        tablosundan `RAG-VEKTOR-UZMANI` ajanının sağlayıcı ve model (`ollama` / `bge-m3:latest`) yapılandırmasını okur.
+        """
+        now_m = time.monotonic()
+        with self._cache_lock:
+            if not force_refresh and self._agent_cfg_cache is not None and (now_m - self._agent_cfg_cached_at) < VECTOR_AGENT_CACHE_TTL_SEC:
+                return dict(self._agent_cfg_cache)
+
+        try:
+            from app.repositories.postgres_db import postgres_db
+
+            # 1. Öncelik: thinkport_db.ai_agents tablosundaki teknik altyapı ajanı (RAG-VEKTOR-UZMANI)
+            row_tp = None
+            try:
+                with postgres_db.connection() as conn:
+                    row_tp = conn.execute(
+                        """
+                        SELECT
+                            id,
+                            kod,
+                            ad,
+                            model_adi,
+                            alternatif_modeller_json,
+                            ai_saglayici_id
+                        FROM ai_agents
+                        WHERE aktif_mi = 1
+                          AND UPPER(COALESCE(NULLIF(BTRIM(kod), ''), ''))
+                              IN ('RAG-VEKTOR-UZMANI', 'RAG_VEKTOR_UZMANI')
+                        ORDER BY id ASC
+                        LIMIT 1
+                        """
+                    ).fetchone()
+            except Exception as tp_exc:
+                gateway_logger.debug(f"thinkport_db.ai_agents RAG-VEKTOR-UZMANI sorgulama: {tp_exc}")
+
+            if row_tp:
+                alt_models: List[str] = []
+                raw_alt = row_tp.get("alternatif_modeller_json")
+                if raw_alt:
+                    try:
+                        parsed_alt = json.loads(raw_alt) if isinstance(raw_alt, str) else raw_alt
+                        if isinstance(parsed_alt, list):
+                            alt_models = [str(m).strip() for m in parsed_alt if str(m).strip()]
+                    except Exception:
+                        alt_models = []
+
+                model_adi = str(row_tp.get("model_adi") or settings.ollama_embedding_model).strip()
+                resolved_provider = "ollama"
+                m_lower = model_adi.lower()
+                if "siliconflow" in m_lower:
+                    resolved_provider = "siliconflow"
+                elif "cloudflare" in m_lower:
+                    resolved_provider = "cloudflare"
+                elif "huggingface" in m_lower or "hf" in m_lower:
+                    resolved_provider = "huggingface"
+                elif "openrouter" in m_lower:
+                    resolved_provider = "openrouter"
+                elif "deepinfra" in m_lower:
+                    resolved_provider = "deepinfra"
+
+                parsed = {
+                    "id": int(row_tp.get("id") or 0),
+                    "kod": str(row_tp.get("kod") or RAG_VECTOR_AGENT_CODE).strip(),
+                    "ad": str(row_tp.get("ad") or "RAG Vektör Uzmanı").strip(),
+                    "provider": resolved_provider,
+                    "model_adi": model_adi,
+                    "alternatif_modeller": alt_models,
+                    "saglayici_id": int(row_tp.get("ai_saglayici_id") or 0) if row_tp.get("ai_saglayici_id") is not None else None,
+                    "saglayici_adi": "Ollama (Yerel LLM)" if resolved_provider == "ollama" else resolved_provider.title(),
+                    "base_url": f"http://{settings.ollama_host}:{settings.ollama_port}" if resolved_provider == "ollama" else "",
+                }
+                with self._cache_lock:
+                    self._agent_cfg_cache = dict(parsed)
+                    self._agent_cfg_cached_at = now_m
+                return parsed
+
+            # 2. Yedek: webakus_db."AiAjanlar" tablosu
+            with postgres_db.rag_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        a."Id",
+                        COALESCE(NULLIF(BTRIM(a."Kod"), ''), NULLIF(BTRIM(a."AjanId"), '')) AS "Kod",
+                        a."Ad",
+                        a."ModelAdi",
+                        a."AlternatifModellerJson",
+                        a."AiSaglayiciId",
+                        s."Ad" AS "SaglayiciAdi",
+                        s."SaglayiciTuru" AS "SaglayiciTuru",
+                        s."BaseUrl" AS "BaseUrl"
+                    FROM "AiAjanlar" a
+                    LEFT JOIN "AiSaglayicilar" s
+                        ON s."Id" = a."AiSaglayiciId" AND NOT s."SilindiMi"
+                    WHERE NOT a."SilindiMi"
+                      AND a."AktifMi"
+                      AND UPPER(COALESCE(NULLIF(BTRIM(a."Kod"), ''), NULLIF(BTRIM(a."AjanId"), ''), ''))
+                          IN ('RAG-VEKTOR-UZMANI', 'RAG_VEKTOR_UZMANI')
+                    ORDER BY a."Id" ASC
+                    LIMIT 1
+                    """
+                ).fetchone()
+
+            if not row:
+                return None
+
+            alt_models: List[str] = []
+            raw_alt = row.get("AlternatifModellerJson")
+            if raw_alt:
+                try:
+                    parsed_alt = json.loads(raw_alt) if isinstance(raw_alt, str) else raw_alt
+                    if isinstance(parsed_alt, list):
+                        alt_models = [str(m).strip() for m in parsed_alt if str(m).strip()]
+                except Exception:
+                    alt_models = []
+
+            resolved_provider = self._resolve_provider_from_agent_row(
+                row.get("SaglayiciTuru"),
+                row.get("SaglayiciAdi"),
+                row.get("BaseUrl"),
+            )
+            raw_base_url = str(row.get("BaseUrl") or "").strip()
+            is_ollama_endpoint = (
+                int(row.get("SaglayiciTuru") or 0) == 4
+                or "ollama" in str(row.get("SaglayiciAdi") or "").lower()
+                or "11434" in raw_base_url.lower()
+            )
+            parsed = {
+                "id": int(row.get("Id") or 0),
+                "kod": str(row.get("Kod") or RAG_VECTOR_AGENT_CODE).strip(),
+                "ad": str(row.get("Ad") or "RAG Vektör Uzmanı").strip(),
+                "provider": resolved_provider,
+                "model_adi": str(row.get("ModelAdi") or settings.ollama_embedding_model).strip(),
+                "alternatif_modeller": alt_models,
+                "saglayici_id": int(row.get("AiSaglayiciId") or 0) if row.get("AiSaglayiciId") is not None else None,
+                "saglayici_adi": str(row.get("SaglayiciAdi") or "").strip(),
+                "base_url": raw_base_url if is_ollama_endpoint else "",
+            }
+            with self._cache_lock:
+                self._agent_cfg_cache = dict(parsed)
+                self._agent_cfg_cached_at = now_m
+            return parsed
+        except Exception as exc:
+            gateway_logger.warning(f"RAG-VEKTOR-UZMANI DB okuma uyarısı: {exc}")
+            return None
+
+    def get_active_vector_agent_summary(self) -> Dict[str, Any]:
+        """Aktif vektör hesaplama ajanının (`RAG-VEKTOR-UZMANI`) özet bilgisini döner."""
+        agent_cfg = self._load_vector_agent_config()
+        if agent_cfg:
+            return agent_cfg
         return {
-            "primary": (dto.embedding_primary_provider or "auto").strip().lower(),
+            "id": None,
+            "kod": RAG_VECTOR_AGENT_CODE,
+            "ad": "RAG Vektör Uzmanı",
+            "provider": "ollama",
+            "model_adi": settings.ollama_embedding_model,
+            "alternatif_modeller": [],
+            "saglayici_id": None,
+            "saglayici_adi": "Ollama (Yerel LLM)",
+            "base_url": f"http://{settings.ollama_host}:{settings.ollama_port}",
+        }
+
+    def _get_live_config(self) -> Dict[str, Any]:
+        """PostgreSQL `system_settings`, `webakus_db."AiAjanlar"` ve ortam değişkenlerinden güncel ayarları okur."""
+        dto = self._settings_repo.get_settings()
+        agent_cfg = self._load_vector_agent_config()
+        raw_primary = (dto.embedding_primary_provider or "ollama").strip().lower()
+        effective_primary = raw_primary
+        if agent_cfg and agent_cfg.get("provider") and raw_primary in ("", "auto", "ollama"):
+            effective_primary = str(agent_cfg["provider"]).strip().lower()
+        elif raw_primary in ("", "auto"):
+            effective_primary = "ollama"
+
+        return {
+            "primary": effective_primary,
+            "raw_setting_primary": raw_primary,
             "enable_semantic_chunking": bool(dto.enable_semantic_chunking),
+            "vector_agent": agent_cfg,
+            "ollama_model": (agent_cfg or {}).get("model_adi") or settings.ollama_embedding_model,
+            "ollama_base_url": (agent_cfg or {}).get("base_url") or "",
             "siliconflow_api_key": (dto.siliconflow_api_key or settings.siliconflow_api_key or "").strip(),
             "hf_api_key": (dto.hf_api_key or settings.hf_api_key or "").strip(),
             "cloudflare_account_id": (dto.cloudflare_account_id or settings.cloudflare_account_id or "").strip(),
@@ -151,8 +363,8 @@ class EmbeddingService:
         cfg: Dict[str, Any],
         preferred_override: Optional[str] = None,
     ) -> List[str]:
-        """Aktif anahtarlara ve birincil sağlayıcı tercihine göre deneme sırasını oluşturur."""
-        available: List[str] = []
+        """Aktif vektör ajanına, anahtarlara ve birincil sağlayıcı tercihine göre deneme sırasını oluşturur."""
+        available: List[str] = ["ollama"]
         if cfg["siliconflow_api_key"]:
             available.append("siliconflow")
         if cfg["cloudflare_account_id"] and cfg["cloudflare_api_token"]:
@@ -163,12 +375,10 @@ class EmbeddingService:
             available.append("openrouter")
         if cfg["deepinfra_api_key"]:
             available.append("deepinfra")
-        # Anahtarsız açık Hugging Face Space (BAAI/bge-m3) yerel Ollama'dan önce online birincil olarak yer alır
         if settings.hf_bge_m3_space_url.strip():
             available.append("hf-space")
-        available.append("ollama")
 
-        primary = (preferred_override or cfg["primary"] or "auto").strip().lower()
+        primary = (preferred_override or cfg["primary"] or "ollama").strip().lower()
         if primary in ("online", "hf-space"):
             primary = "hf-space"
         if primary and primary != "auto" and primary in NEURAL_BGE_M3_PROVIDERS:
@@ -314,13 +524,13 @@ class EmbeddingService:
     def _call_hf_space_bge_m3(
         self,
         batch: List[str],
-        timeout_sec: float = 45.0,
+        timeout_sec: float = 5.0,
     ) -> Optional[List[List[float]]]:
         """
         Anahtarsız (0 API Key) açık Hugging Face Space (`*.hf.space`) üzerinden
         `@akalin/proxy_module` (`akalin_proxy_db`) proxy rotasyonuyla canlı `BAAI/bge-m3` (1024d)
-        vektörlerini alır. Hız sınırına (429/403) veya geçici ağ kesintisine karşı
-        farklı proxy düğümleriyle otomatik yeniden deneme yapar.
+        vektörlerini alır. `_post_json_via_proxy_pool` zaten `max_proxy_attempts=2` farklı düğüm
+        denediği için hızlı fail-over yaparak yerel Ollama katmanını bekletmez.
         """
         base_url = settings.hf_bge_m3_space_url.strip().rstrip("/")
         if not base_url:
@@ -328,71 +538,90 @@ class EmbeddingService:
 
         url = f"{base_url}/embeddings"
         payload_dict = {"input": batch[:HF_SPACE_BATCH_SIZE]}
-        for retry_idx in range(3):
-            try:
-                status_code, parsed, proxy_meta = self._post_json_via_proxy_pool(
-                    url=url,
-                    payload_dict=payload_dict,
-                    timeout_sec=timeout_sec,
+        try:
+            status_code, parsed, proxy_meta = self._post_json_via_proxy_pool(
+                url=url,
+                payload_dict=payload_dict,
+                timeout_sec=timeout_sec,
+            )
+            if status_code != 200 or parsed is None:
+                return None
+
+            if isinstance(parsed, dict):
+                items = parsed.get("data") or parsed.get("embeddings")
+            elif isinstance(parsed, list):
+                items = parsed
+            else:
+                items = None
+
+            if not isinstance(items, list) or len(items) != len(batch):
+                return None
+
+            vectors: List[List[float]] = []
+            for item in items:
+                if isinstance(item, dict) and "embedding" in item:
+                    vectors.append(self.normalize_vector_1024(item["embedding"]))
+                elif isinstance(item, list):
+                    vectors.append(self.normalize_vector_1024(item))
+            if len(vectors) == len(batch):
+                gateway_logger.info(
+                    f"BGE_M3_ONLINE_PROXY_OK | provider=hf-space | batch_size={len(batch)} "
+                    f"| proxy_id={proxy_meta.get('proxy_id')} | proxy={proxy_meta.get('proxy_endpoint')} "
+                    f"| country={proxy_meta.get('proxy_country')} | mode={proxy_meta.get('transport_mode')} "
+                    f"| latency_ms={proxy_meta.get('latency_ms')}"
                 )
-                if status_code != 200 or parsed is None:
-                    time.sleep(0.2 * (retry_idx + 1))
-                    continue
-
-                if isinstance(parsed, dict):
-                    items = parsed.get("data") or parsed.get("embeddings")
-                elif isinstance(parsed, list):
-                    items = parsed
-                else:
-                    items = None
-
-                if not isinstance(items, list) or len(items) != len(batch):
-                    continue
-
-                vectors: List[List[float]] = []
-                for item in items:
-                    if isinstance(item, dict) and "embedding" in item:
-                        vectors.append(self.normalize_vector_1024(item["embedding"]))
-                    elif isinstance(item, list):
-                        vectors.append(self.normalize_vector_1024(item))
-                if len(vectors) == len(batch):
-                    gateway_logger.info(
-                        f"BGE_M3_ONLINE_PROXY_OK | provider=hf-space | batch_size={len(batch)} "
-                        f"| proxy_id={proxy_meta.get('proxy_id')} | proxy={proxy_meta.get('proxy_endpoint')} "
-                        f"| country={proxy_meta.get('proxy_country')} | mode={proxy_meta.get('transport_mode')} "
-                        f"| latency_ms={proxy_meta.get('latency_ms')}"
-                    )
-                    return vectors
-            except Exception as exc:
-                if retry_idx == 2:
-                    gateway_logger.warning(
-                        f"BGE_M3_ONLINE_PROXY_RETRY_WARN | url={url} | err={exc}"
-                    )
-                time.sleep(0.3 * (retry_idx + 1))
+                return vectors
+        except Exception as exc:
+            gateway_logger.warning(
+                f"BGE_M3_ONLINE_PROXY_RETRY_WARN | url={url} | err={exc}"
+            )
         return None
+
+    @staticmethod
+    def _parse_ollama_endpoint(ollama_base_url: Optional[str]) -> Tuple[str, int, bool, str]:
+        """Sağlayıcı `BaseUrl` değerinden Ollama `(host, port, is_https, path_prefix)` çıkarır."""
+        raw = str(ollama_base_url or "").strip().rstrip("/")
+        if raw.lower().endswith("/v1"):
+            raw = raw[:-3]
+        if raw:
+            try:
+                parsed = urlparse(raw)
+                host = parsed.hostname or settings.ollama_host
+                is_https = parsed.scheme.lower() == "https"
+                port = parsed.port or (443 if is_https else (settings.ollama_port if host == settings.ollama_host else 11434))
+                path_prefix = parsed.path.rstrip("/")
+                return (host, int(port), is_https, path_prefix)
+            except Exception:
+                pass
+        return (settings.ollama_host, int(settings.ollama_port), False, "")
 
     def _call_ollama_bge_m3(
         self,
         batch: List[str],
-        timeout_sec: float = 20.0,
+        timeout_sec: float = 60.0,
+        model_override: Optional[str] = None,
+        ollama_base_url: Optional[str] = None,
     ) -> Optional[List[List[float]]]:
-        """Yerel Ollama `/api/embed` uç noktasından `bge-m3:latest` (veya `bge-m3`) vektörlerini alır."""
+        """Yerel Ollama `/api/embed` uç noktasından ajan tanımlı `bge-m3:latest` (veya `bge-m3`) vektörlerini alır."""
         candidate_models = []
-        for m in (settings.ollama_embedding_model, "bge-m3:latest", "bge-m3"):
-            if m and m not in candidate_models:
-                candidate_models.append(m)
+        for m in (model_override, settings.ollama_embedding_model, "bge-m3:latest", "bge-m3"):
+            clean_m = str(m or "").strip()
+            if clean_m and clean_m not in candidate_models:
+                candidate_models.append(clean_m)
+
+        host, port, is_https, path_prefix = self._parse_ollama_endpoint(ollama_base_url)
 
         for model_name in candidate_models:
-            conn = http.client.HTTPConnection(
-                settings.ollama_host,
-                settings.ollama_port,
-                timeout=timeout_sec,
+            conn = (
+                http.client.HTTPSConnection(host, port, timeout=timeout_sec, context=create_verified_ssl_context())
+                if is_https
+                else http.client.HTTPConnection(host, port, timeout=timeout_sec)
             )
             try:
                 payload = json.dumps({"model": model_name, "input": batch}, ensure_ascii=False).encode("utf-8")
                 conn.request(
                     "POST",
-                    "/api/embed",
+                    f"{path_prefix}/api/embed",
                     body=payload,
                     headers={"Content-Type": "application/json"},
                 )
@@ -403,8 +632,11 @@ class EmbeddingService:
                     embeddings = parsed.get("embeddings")
                     if isinstance(embeddings, list) and len(embeddings) == len(batch):
                         return [self.normalize_vector_1024(v) for v in embeddings]
-            except Exception:
-                return None
+            except Exception as exc:
+                gateway_logger.warning(
+                    f"OLLAMA_BGE_M3_WARN | model={model_name} | host={host}:{port} | err={exc}"
+                )
+                continue
             finally:
                 conn.close()
         return None
@@ -455,7 +687,11 @@ class EmbeddingService:
         if provider == "hf-space":
             return self._call_hf_space_bge_m3(batch)
         if provider == "ollama":
-            return self._call_ollama_bge_m3(batch)
+            return self._call_ollama_bge_m3(
+                batch,
+                model_override=cfg.get("ollama_model"),
+                ollama_base_url=cfg.get("ollama_base_url"),
+            )
         return None
 
     def embed_texts(
@@ -489,6 +725,13 @@ class EmbeddingService:
         t0 = time.perf_counter()
 
         for provider in provider_chain:
+            if (
+                not preferred_provider
+                and provider != "ollama"
+                and self._provider_cooldown_until.get(provider, 0.0) > time.monotonic()
+            ):
+                continue
+
             try:
                 all_vectors: List[List[float]] = []
                 ok = True
@@ -523,6 +766,7 @@ class EmbeddingService:
                         all_vectors.extend(batch_vecs)
 
                 if ok and len(all_vectors) == len(sanitized):
+                    self._provider_cooldown_until.pop(provider, None)
                     elapsed_ms = int((time.perf_counter() - t0) * 1000)
                     self._last_active_provider = provider
                     self._last_latency_ms = elapsed_ms
@@ -532,11 +776,17 @@ class EmbeddingService:
                             while len(self._query_cache) > self._max_cache_items:
                                 self._query_cache.popitem(last=False)
                     return (all_vectors, provider)
+                if provider != "ollama":
+                    self._provider_cooldown_until[provider] = time.monotonic() + 300.0
             except urllib.error.HTTPError as http_err:
+                if provider != "ollama":
+                    self._provider_cooldown_until[provider] = time.monotonic() + 300.0
                 gateway_logger.warning(
                     f"BGE-M3 embedding HTTP hatası | provider={provider} | code={http_err.code}"
                 )
             except Exception as exc:
+                if provider != "ollama":
+                    self._provider_cooldown_until[provider] = time.monotonic() + 300.0
                 if provider != "ollama":
                     gateway_logger.warning(
                         f"BGE-M3 embedding sağlayıcı hatası | provider={provider} | hata={exc}"
@@ -600,10 +850,27 @@ class EmbeddingService:
                 "message": str(exc),
             }
 
-    def get_status_summary(self) -> Dict[str, Any]:
-        """Yapılandırılmış tüm online ve yerel `BAAI/bge-m3` sağlayıcılarının ve proxy havuzunun durum özetini döner."""
+    def get_effective_embedding_model(self, provider: Optional[str] = None) -> str:
+        """Aktif sağlayıcı için kullanılan model adını (örn. yerel Ollama için `bge-m3:latest`) döner."""
         cfg = self._get_live_config()
-        ollama_ready = self._call_ollama_bge_m3(["test"], timeout_sec=1.5) is not None
+        resolved_prov = (provider or self._last_active_provider or cfg.get("primary") or "ollama").strip().lower()
+        if resolved_prov == "ollama":
+            return str(cfg.get("ollama_model") or settings.ollama_embedding_model)
+        return BGE_M3_MODEL_ID
+
+    def get_status_summary(self) -> Dict[str, Any]:
+        """Yapılandırılmış tüm online ve yerel `BAAI/bge-m3` sağlayıcılarının, vektör ajanının ve proxy havuzunun durum özetini döner."""
+        cfg = self._get_live_config()
+        ollama_model = str(cfg.get("ollama_model") or settings.ollama_embedding_model)
+        ollama_ready = (
+            self._call_ollama_bge_m3(
+                ["test"],
+                timeout_sec=2.0,
+                model_override=ollama_model,
+                ollama_base_url=cfg.get("ollama_base_url"),
+            )
+            is not None
+        )
         configured_online = []
         if cfg["siliconflow_api_key"]:
             configured_online.append("siliconflow")
@@ -618,15 +885,34 @@ class EmbeddingService:
         if settings.hf_bge_m3_space_url.strip():
             configured_online.append("hf-space")
 
+        provider_order = self._build_provider_order(cfg)
+        default_active = (
+            "ollama"
+            if (cfg["primary"] == "ollama" and ollama_ready)
+            else (provider_order[0] if provider_order else "lexical-1024-fallback")
+        )
+        active_provider = self._last_active_provider or default_active
+        vector_agent = self.get_active_vector_agent_summary()
+
         return {
-            "model": BGE_M3_MODEL_ID,
+            "model": self.get_effective_embedding_model(active_provider),
+            "canonical_model": BGE_M3_MODEL_ID,
             "dimensions": BGE_M3_DIMENSIONS,
             "primary_preference": cfg["primary"],
+            "ollama_embedding_model": ollama_model,
+            "vector_agent": {
+                "id": vector_agent.get("id"),
+                "kod": vector_agent.get("kod"),
+                "ad": vector_agent.get("ad"),
+                "saglayici_adi": vector_agent.get("saglayici_adi"),
+                "provider": vector_agent.get("provider"),
+                "model_adi": vector_agent.get("model_adi"),
+            },
             "semantic_chunking_enabled": cfg["enable_semantic_chunking"],
             "configured_online_providers": configured_online,
             "local_ollama_bge_m3_ready": ollama_ready,
             "neural_ready": bool(configured_online or ollama_ready),
-            "last_active_provider": self._last_active_provider or (configured_online[0] if configured_online else ("ollama" if ollama_ready else "lexical-1024-fallback")),
+            "last_active_provider": active_provider,
             "last_latency_ms": self._last_latency_ms,
             "last_proxy_telemetry": self._last_proxy_telemetry,
             "proxy_pool_stats": self.get_proxy_pool_stats(reset=False),

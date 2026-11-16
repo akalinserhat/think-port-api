@@ -164,7 +164,7 @@ class GatewaySettingsDTO(BaseModel):
     keep_alive_interval_sec: int = 300
     enable_stealth: bool = True
     auto_rotate_proxy_on_403: bool = True
-    embedding_primary_provider: str = "auto"
+    embedding_primary_provider: str = "ollama"
     embedding_model: str = "BAAI/bge-m3"
     enable_semantic_chunking: bool = True
     siliconflow_api_key: str = ""

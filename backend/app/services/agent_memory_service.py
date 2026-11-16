@@ -107,6 +107,7 @@ class AgentMemoryService:
                 "hafiza_saklama_gun": 30,
                 "hafiza_arama_top_k": 5,
                 "gozlemci_aktif_mi": True,
+                "gozlemci_devre_disi": False,
                 "sistem_istemi": "",
             }
 
@@ -179,6 +180,7 @@ class AgentMemoryService:
                     "hafiza_saklama_gun": 30,
                     "hafiza_arama_top_k": 5,
                     "gozlemci_aktif_mi": True,
+                    "gozlemci_devre_disi": False,
                     "sistem_istemi": "",
                 }
 
@@ -191,6 +193,7 @@ class AgentMemoryService:
                 "hafiza_saklama_gun": int(row.get("hafiza_saklama_gun") or 30),
                 "hafiza_arama_top_k": int(row.get("hafiza_arama_top_k") or 5),
                 "gozlemci_aktif_mi": bool(row.get("gozlemci_aktif_mi") if row.get("gozlemci_aktif_mi") is not None else 1),
+                "gozlemci_devre_disi": not bool(row.get("gozlemci_aktif_mi") if row.get("gozlemci_aktif_mi") is not None else 1),
                 "sistem_istemi": str(row.get("sistem_istemi") or ""),
             }
 
@@ -352,7 +355,7 @@ class AgentMemoryService:
             if t_name not in existing_names:
                 tools_list.append(mem_tool)
 
-        # Veritabanındaki THINKPORT_GENEL_ASISTAN veya ajanın kendi kurallarından hafıza yönergesini hazırla
+        # Ajanın kendi kurallarından veya yapılandırmasından hafıza yönergesini hazırla
         top_k = int(agent_config.get("hafiza_arama_top_k") or 5)
         instruction = (
             f"\n\n[THINKPORT PGVECTOR AJAN HAFIZASI YETKİSİ ({app_id}:{agent_id})]:\n"
@@ -1154,31 +1157,59 @@ class AgentMemoryService:
                 return (";".join(parts), len(parts))
         return ("", 2)
 
-    @staticmethod
-    def is_valid_csv_data_row(line: str, expected_cols: int = 2) -> bool:
+    _CSV_HEADER_KEYWORDS = (
+        "urunkodu",
+        "ürünkodu",
+        "kod",
+        "urun_kodu",
+        "model",
+        "tablono",
+        "tablo_no",
+    )
+
+    @classmethod
+    def normalize_csv_row_parts(cls, parts: List[str], expected_cols: int = 2) -> List[str]:
+        """
+        Model önündeki grup/kategori etiketlerini (örn: 'NF TF;KDN55NWE0N;1.424,42' veya
+        'NF TF KDN55NWE0N;1.424,42') 2 sütunlu `UrunKodu;Fiyat` şeması için temizler.
+        """
+        cleaned = [p.strip() for p in parts]
+        if not cleaned or cleaned[0].lower() in cls._CSV_HEADER_KEYWORDS:
+            return cleaned
+        target_cols = expected_cols or 2
+        if len(cleaned) >= 3 and target_cols <= 2:
+            c0, c1, c2 = cleaned[0], cleaned[1], cleaned[2]
+            c0_is_group = (" " in c0) or (not re.search(r"\d", c0)) or len(c0) < 4
+            c1_is_sku = bool(c1) and (" " not in c1) and len(c1) >= 4 and (bool(re.search(r"\d", c1)) or c1.isalnum())
+            c2_is_price = bool(c2) and bool(re.search(r"\d", c2))
+            if c0_is_group and c1_is_sku and c2_is_price:
+                return [c1, c2] + cleaned[3:]
+        if len(cleaned) >= 2 and " " in cleaned[0]:
+            m = re.search(r"(?:^|\s)([A-Za-z0-9][A-Za-z0-9\-/]{3,})$", cleaned[0])
+            if m and re.search(r"\d", m.group(1)):
+                return [m.group(1)] + cleaned[1:]
+        return cleaned
+
+    @classmethod
+    def is_valid_csv_data_row(cls, line: str, expected_cols: int = 2) -> bool:
         """Verilen satırın eksiksiz bir noktalı virgüllü CSV veri satırı olup olmadığını kontrol eder."""
         s = (line or "").strip()
         if not s or ";" not in s or s.startswith("#") or s.startswith("```"):
             return False
-        parts = [p.strip() for p in s.split(";")]
+        raw_parts = [p.strip() for p in s.split(";")]
+        if raw_parts[0].lower() in cls._CSV_HEADER_KEYWORDS:
+            return False
+        parts = cls.normalize_csv_row_parts(raw_parts, expected_cols=expected_cols)
         min_cols = max(2, expected_cols or 2)
         if len(parts) < min_cols or any(not p for p in parts[:min_cols]):
             return False
-        if parts[0].lower() in (
-            "urunkodu",
-            "ürünkodu",
-            "kod",
-            "urun_kodu",
-            "model",
-            "tablono",
-            "tablo_no",
-        ):
-            return False
-        if " " in parts[0] or len(parts[0]) < 4:
+        code_col = parts[0]
+        price_col = parts[1]
+        if " " in code_col or len(code_col) < 4:
             return False
         if any(p[-1] in (",", ".", "-", "=") for p in parts[1:] if p):
             return False
-        if not re.search(r"\d", parts[1]):
+        if not re.search(r"\d", price_col):
             return False
         return True
 
@@ -1195,12 +1226,17 @@ class AgentMemoryService:
         olarak iletilmek üzere saklar.
         Dönüş: `(clean_prefix_csv, data_rows, last_valid_data_row, dropped_complete_row, cut_off_fragment)`
         """
-        lines = [
-            ln.strip()
-            for ln in (csv_text or "").splitlines()
-            if ln.strip() and not ln.strip().startswith("```")
-        ]
         _, expected_cols = cls.detect_csv_header_info(csv_text)
+        lines: List[str] = []
+        for raw_ln in (csv_text or "").splitlines():
+            ln = raw_ln.strip()
+            if not ln or ln.startswith("```"):
+                continue
+            if not ln.startswith("#") and ";" in ln:
+                raw_parts = [p.strip() for p in ln.split(";")]
+                norm_parts = cls.normalize_csv_row_parts(raw_parts, expected_cols=expected_cols)
+                ln = ";".join(norm_parts)
+            lines.append(ln)
         dropped_complete_row: Optional[str] = None
         removed_fragments: List[str] = []
 
@@ -1218,15 +1254,7 @@ class AgentMemoryService:
                     removed_fragments.append(lines.pop())
                 break
             first_col = tail.split(";", 1)[0].strip().lower() if ";" in tail else ""
-            if first_col in (
-                "urunkodu",
-                "ürünkodu",
-                "kod",
-                "urun_kodu",
-                "model",
-                "tablono",
-                "tablo_no",
-            ):
+            if first_col in cls._CSV_HEADER_KEYWORDS:
                 parts_hdr = [p.strip() for p in tail.split(";")]
                 if len(parts_hdr) < 2 or any(not p for p in parts_hdr):
                     removed_fragments.append(lines.pop())
@@ -1237,6 +1265,23 @@ class AgentMemoryService:
                 break
 
         cut_off_fragment = "\n".join(reversed(removed_fragments)).strip()
+        deduped_lines: List[str] = []
+        seen_section_codes: set[str] = set()
+        current_table_tag = ""
+        for ln in lines:
+            if ln.upper().startswith("#TABLO") and not ln.upper().startswith("#TABLOLAR"):
+                current_table_tag = ln.strip().upper()
+                deduped_lines.append(ln)
+                continue
+            if cls.is_valid_csv_data_row(ln, expected_cols=expected_cols):
+                row_code = ln.split(";", 1)[0].strip().upper() if ";" in ln else ln.strip().upper()
+                dedup_key = f"{current_table_tag}::{row_code}"
+                if dedup_key in seen_section_codes:
+                    continue
+                seen_section_codes.add(dedup_key)
+            deduped_lines.append(ln)
+        lines = deduped_lines
+
         data_rows = [
             ln for ln in lines if cls.is_valid_csv_data_row(ln, expected_cols=expected_cols)
         ]
@@ -1265,6 +1310,10 @@ class AgentMemoryService:
         Böylece benzer ön ekli ardışık kodların uzun metin içinde gözden kaçması önlenir.
         """
         doc = document_text or ""
+        if "\\n" in doc:
+            doc = doc.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        if "\\u" in doc:
+            doc = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), doc)
         code = (anchor_code or "").strip()
         if not doc or len(doc) < 600 or len(code) < 3:
             return ""
@@ -1381,7 +1430,7 @@ class AgentMemoryService:
             role = m.get("role", "user")
             if role in ("system", "developer"):
                 system_context_parts.append(str(m.get("content") or ""))
-            elif role == "user":
+            elif role in ("user", "tool"):
                 user_context_parts.append(str(m.get("content") or ""))
         combined_sys_context = "\n\n".join(p for p in system_context_parts if p).strip()
         combined_usr_only = "\n\n".join(p for p in user_context_parts if p).strip()
@@ -1804,11 +1853,15 @@ class AgentMemoryService:
                         rules_list = json.loads(raw_rules)
                         if isinstance(rules_list, list):
                             for r in rules_list:
-                                if isinstance(r, dict) and str(r.get("id") or "").upper() == "DEVAM_ISTEMI_KURALLARI":
+                                if isinstance(r, dict) and str(r.get("id") or "").upper() == "BIRINCIL_DEVAM_ISTEMI":
                                     rule_text = str(r.get("icerik") or "").strip()
                                     break
-                    if not rule_text and row.get("sistem_istemi"):
-                        rule_text = str(row["sistem_istemi"]).strip()
+                    if not rule_text:
+                        rule_text = (
+                            "Önceki çıktı yarım kaldı veya kaynak belgedeki bazı satırlar eksik bırakıldı. "
+                            "Başlıkları (#META/#TABLO/sütun başlığı) veya daha önce yazdığın satırları TEKRAR ETMEDEN, "
+                            "yalnızca kaldığın son geçerli satırdan hemen sonraki ilk eksik satırdan başlayarak kalan tüm satırları aynı CSV biçiminde eksiksiz yaz."
+                        )
         except Exception:
             pass
 
@@ -1899,7 +1952,7 @@ class AgentMemoryService:
             s = ln.strip()
             if s.startswith("#") or s.startswith("```") or ";" not in s:
                 continue
-            parts = [p.strip() for p in s.split(";")]
+            parts = cls.normalize_csv_row_parts([p.strip() for p in s.split(";")], expected_cols=expected_cols)
             if len(parts) >= 2 and parts[0].lower() not in header_keywords:
                 seen_keys.add(";".join([parts[0].upper()] + parts[1:]))
                 last_base_code = parts[0].upper()
@@ -1934,7 +1987,7 @@ class AgentMemoryService:
             s = re.sub(r"^(?:#?\d+[\.\)\:\-\s]+|\-\s+|\*\s+)", "", s).strip()
             if ";" not in s or s.startswith("#"):
                 continue
-            parts = [p.strip() for p in s.split(";")]
+            parts = cls.normalize_csv_row_parts([p.strip() for p in s.split(";")], expected_cols=expected_cols)
             if len(parts) >= 2:
                 code = parts[0].strip()
                 price = parts[1].strip()

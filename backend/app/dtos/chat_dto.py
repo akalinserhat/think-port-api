@@ -63,6 +63,9 @@ class ChatCompletionRequestDTO(BaseModel):
     agent_id: Optional[str] = None
     agent_code: Optional[str] = None
     agent_name: Optional[str] = None
+    gozlemci_devre_disi: Optional[bool] = Field(default=None)
+    skip_observer: Optional[bool] = Field(default=None)
+    gozlemci_aktif_mi: Optional[bool] = Field(default=None)
 
     def normalized_response_format(self) -> Optional[Dict[str, Any]]:
         """`response_format` alanını standart sözlük yapısına dönüştürür."""

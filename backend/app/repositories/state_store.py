@@ -41,7 +41,7 @@ class InMemoryStateStore:
             "keep_alive_interval_sec": 300,
             "enable_stealth": True,
             "auto_rotate_proxy_on_403": True,
-            "embedding_primary_provider": "auto",
+            "embedding_primary_provider": "ollama",
             "embedding_model": app_cfg.embedding_model_id,
             "enable_semantic_chunking": app_cfg.rag_semantic_chunking,
             "siliconflow_api_key": app_cfg.siliconflow_api_key,
