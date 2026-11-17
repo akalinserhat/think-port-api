@@ -793,15 +793,16 @@ class ChatService:
             tc_name_lower in _non_batch_lookup_tools
             or tc_name_lower.startswith(("erp_get_", "erp_list_", "erp_search_", "rag_"))
         )
+        # Gözlemci Ajan YALNIZCA fiziksel bir kesilme (finish_reason == 'length' veya bozuk/yarım JSON yapısı) olduğunda devreye girmelidir.
+        # Yanıt doğal olarak tamamlandıysa ('stop' ve kesilme yok) ekli dosya veya uzun girdi olsa bile gereksiz gözlemci turu başlatılmaz.
+        is_physically_truncated_tc = (
+            is_json_truncated
+            or actual_finish_reason == "length"
+        )
         should_inspect_tool_call = (
             salvaged_dict is not None
-            and not (is_lookup_tool and not is_json_truncated and actual_finish_reason != "length")
-            and (
-                is_json_truncated
-                or actual_finish_reason == "length"
-                or bool(req_attachments)
-                or len(clean_user_text or "") > 1500
-            )
+            and not is_lookup_tool
+            and is_physically_truncated_tc
         )
         if not should_inspect_tool_call or salvaged_dict is None:
             return (tool_calls, added_tokens, reasoning_text, added_traces)
@@ -972,27 +973,13 @@ class ChatService:
             is_json_mode=(output_mode == "json"),
         )
 
-        has_tool_history = False
-        tool_context_chars = 0
-        for m in (root_job.messages or []):
-            if str(getattr(m, "role", "") or "").lower() == "tool":
-                has_tool_history = True
-                tool_context_chars += len(str(getattr(m, "content", "") or ""))
-        total_source_chars = len(clean_user_text or "") + tool_context_chars
-        if output_mode in ("csv", "json"):
-            should_inspect = (
-                is_truncated
-                or actual_finish_reason == "length"
-                or bool(req_attachments)
-                or total_source_chars > 1500
-            )
-        else:
-            should_inspect = (
-                is_truncated
-                or actual_finish_reason == "length"
-                or bool(req_attachments)
-                or (not has_tool_history and len(clean_user_text or "") > 2500)
-            )
+        # Gözlemci Ajan YALNIZCA fiziksel bir kesilme (finish_reason == 'length' veya yapısal olarak yarım kalan kod/JSON/tablo) olduğunda devreye girmelidir.
+        # Yanıt doğal olarak tamamlandıysa ('stop' ve kesilme yok) ekli dosya veya uzun girdi olsa bile gereksiz gözlemci turu başlatılmaz.
+        is_physically_truncated_content = (
+            is_truncated
+            or actual_finish_reason == "length"
+        )
+        should_inspect = is_physically_truncated_content
 
         if not should_inspect:
             return (full_content, added_tokens, reasoning_text, added_traces, full_content)
