@@ -88,12 +88,21 @@ class AuthService:
             raw_api_key=api_key,
         )
 
-    def acquire_concurrency_slot(self, user_ctx: AuthenticatedUserContextDTO) -> None:
+    def acquire_concurrency_slot(
+        self,
+        user_ctx: AuthenticatedUserContextDTO,
+        is_batch_worker: bool = False,
+    ) -> None:
         """Kullanıcı için eşzamanlı istek slotu ayırır; sınır aşılırsa geri alır ve hata fırlatır."""
+        effective_limit = (
+            max(user_ctx.concurrent_limit, 16)
+            if is_batch_worker
+            else user_ctx.concurrent_limit
+        )
         active_count = self._usage_repo.increment_active_requests(user_ctx.user_id)
-        if active_count > user_ctx.concurrent_limit:
+        if active_count > effective_limit:
             self._usage_repo.decrement_active_requests(user_ctx.user_id)
-            raise concurrency_limit_exceeded_error(user_ctx.concurrent_limit)
+            raise concurrency_limit_exceeded_error(effective_limit)
 
     def release_concurrency_slot(self, user_id: str) -> None:
         """Tamamlanan isteğin eşzamanlılık slotunu serbest bırakır."""

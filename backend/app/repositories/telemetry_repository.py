@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 from app.dtos.admin_dto import UsageLogDTO, GatewaySettingsDTO
@@ -13,6 +14,7 @@ class UsageRepository:
 
     def __init__(self, state_store: InMemoryStateStore) -> None:
         self._store = state_store
+        self._counter_lock = threading.Lock()
 
     def list_recent_logs(self, limit: int = 50) -> List[UsageLogDTO]:
         """En güncel kullanım kayıtlarını SQLite tablosundan belirtilen limitle döner."""
@@ -162,22 +164,25 @@ class UsageRepository:
 
     def increment_minute_rate_counter(self, rate_key: str) -> int:
         """Dakikalık istek sayacını 1 artırır ve güncel değeri döner."""
-        count = self._store.rate_counters.get(rate_key, 0) + 1
-        self._store.rate_counters[rate_key] = count
-        return count
+        with self._counter_lock:
+            count = self._store.rate_counters.get(rate_key, 0) + 1
+            self._store.rate_counters[rate_key] = count
+            return count
 
     def increment_active_requests(self, user_id: str) -> int:
         """Kullanıcının aktif eşzamanlı istek sayacını 1 artırır."""
-        count = self._store.active_requests.get(user_id, 0) + 1
-        self._store.active_requests[user_id] = count
-        return count
+        with self._counter_lock:
+            count = self._store.active_requests.get(user_id, 0) + 1
+            self._store.active_requests[user_id] = count
+            return count
 
     def decrement_active_requests(self, user_id: str) -> int:
         """Kullanıcının aktif eşzamanlı istek sayacını 1 azaltır."""
-        current = self._store.active_requests.get(user_id, 1)
-        updated = max(0, current - 1)
-        self._store.active_requests[user_id] = updated
-        return updated
+        with self._counter_lock:
+            current = self._store.active_requests.get(user_id, 1)
+            updated = max(0, current - 1)
+            self._store.active_requests[user_id] = updated
+            return updated
 
 
 class SettingsRepository:

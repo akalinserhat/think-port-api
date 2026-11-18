@@ -98,8 +98,8 @@ class AdminService:
             created_at=datetime.now(timezone.utc).strftime("%H:%M:%S"),
         )
         gateway_logger.info(
-            f"CHAT_COMPLETION | id={dto.request_id} | conv={dto.conversation_id} | model={dto.model} "
-            f"| upstream={dto.upstream_provider} | status={dto.status} | ttft={dto.ttft_ms}ms "
+            f"CHAT_COMPLETION | id={dto.request_id} | conv={dto.conversation_id} | session={dto.session_id} "
+            f"| model={dto.model} | upstream={dto.upstream_provider} | status={dto.status} | ttft={dto.ttft_ms}ms "
             f"| total={dto.latency_ms}ms | tokens={dto.prompt_tokens}+{dto.completion_tokens}={total_tokens} "
             f"| files={dto.attachment_names} | prompt={dto.prompt_preview[:80]!r}"
         )

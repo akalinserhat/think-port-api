@@ -88,7 +88,8 @@ class ChatService:
         sohbet oturumunu ve kullanıcının mesajını SQLite veritabanına kaydeder,
         yayın kanalını açar ve arka plan AI görevini başlatır.
         """
-        self._auth_service.acquire_concurrency_slot(user_ctx)
+        is_batch_worker = bool(request.is_batch_worker)
+        self._auth_service.acquire_concurrency_slot(user_ctx, is_batch_worker=is_batch_worker)
         normalized_model = self._model_service.normalize_model_id(request.model)
         provider = self._model_service.resolve_provider_for_model(normalized_model)
         normalized_rf = request.normalized_response_format()
@@ -131,11 +132,11 @@ class ChatService:
                 or "ARAÇ ÇAĞIRMA" in upper_usr
             )
         )
-        if is_explicit_no_tools or is_pure_extraction_without_tools:
+        if is_explicit_no_tools or is_pure_extraction_without_tools or is_batch_worker:
             request.tools = None
             request.tool_choice = None
 
-        gozlemci_aktif_mi = True
+        gozlemci_aktif_mi = not is_batch_worker
         if norm_agent:
             agent_cfg = agent_memory_service.ensure_agent_registered_and_get_config(
                 app_id=norm_app,
@@ -143,8 +144,9 @@ class ChatService:
                 agent_name=request.agent_name,
                 model_id=normalized_model,
             )
-            gozlemci_aktif_mi = bool(agent_cfg.get("gozlemci_aktif_mi", True))
-            if not (is_explicit_no_tools or is_pure_extraction_without_tools):
+            if not is_batch_worker:
+                gozlemci_aktif_mi = bool(agent_cfg.get("gozlemci_aktif_mi", True))
+            if not (is_explicit_no_tools or is_pure_extraction_without_tools or is_batch_worker):
                 injected_tools, mem_instruction = (
                     agent_memory_service.inject_memory_tools_and_instructions(
                         existing_tools=request.tools,
@@ -185,8 +187,11 @@ class ChatService:
             )
             else "api"
         )
-        initial_title = ConversationRepository._derive_title_from_prompt(
-            clean_user_text, attachments
+        custom_title = (request.session_title or "").strip()
+        initial_title = (
+            custom_title[:120]
+            if custom_title
+            else ConversationRepository._derive_title_from_prompt(clean_user_text, attachments)
         )
 
         conversation = self._conversation_repo.ensure_conversation(
@@ -454,10 +459,10 @@ class ChatService:
             if next_reasoning:
                 reasoning_text = f"{reasoning_text}\n\n{next_reasoning}".strip() if reasoning_text else next_reasoning
 
-        # 2. Gözlemci Ajan (GOZLEMCI_AJAN) — Tüm Modlarda (tool_calls, CSV, JSON, Metin/Kod) Evrensel Denetim ve Tamamlama
+        # 2. Gözlemci Ajan (GOZLEMCI_AJAN) — Fiziksel kesilme (length) olduğunda skip_observer olsa dahi Gateway kendi içinde tamamlar
         actual_finish_reason = self._job_finish_reasons.pop(current_job.job_id, "stop")
         is_json_mode = self._formatter.is_json_mode_requested(current_job.response_format)
-        if current_job.gozlemci_aktif_mi:
+        if current_job.gozlemci_aktif_mi or actual_finish_reason == "length":
             pre_obs_content = full_content
             pre_obs_reasoning = reasoning_text
             pre_obs_tcs = json.dumps(tool_calls, ensure_ascii=False) if tool_calls else ""
@@ -1270,7 +1275,7 @@ class ChatService:
 
         # --- MOD 2 & 3: Yapılandırılmış JSON ve Genel Metin / Markdown / Kod Denetimi ---
         clean_initial_prefix = full_content
-        for obs_step in range(1, 5):
+        for obs_step in range(1, 4):
             json_struct_trunc = False
             cut_tail = trunc_reason
             if output_mode == "json" and (full_content or "").lstrip().startswith(
@@ -1283,53 +1288,81 @@ class ChatService:
                     cut_tail = salvaged_tail
 
             inspect_truncated = is_truncated or json_struct_trunc
-            needs_cont, obs_reason, cont_directive, _ = await asyncio.to_thread(
-                agent_memory_service.evaluate_with_observer_agent,
-                self._llm_provider,
-                self._model_service,
-                prepared_orig.text_only_messages,
-                full_content or "",
-                None,
-                None,
-                inspect_truncated,
-                cut_tail,
-                output_mode,
-            )
-            gateway_logger.info(
-                f"OBSERVER_INSPECTION | id={current_job.job_id} | step={obs_step} | mode={output_mode} "
-                f"| app={current_job.app_id} | agent={current_job.agent_id} "
-                f"| chars={len(full_content or '')} | truncated={inspect_truncated} "
-                f"| needs_continuation={needs_cont} | reason={obs_reason}"
-            )
-            obs_trace_line = (
-                f"🛡️ [GOZLEMCI_AJAN DENETİMİ (Tur {obs_step} - {output_mode.upper()})]: "
-                f"Uzunluk={len(full_content or '')} krk | Kesinti={inspect_truncated} "
-                f"| Devam Gerekli Mi={needs_cont} | Neden={obs_reason}"
-            )
-            added_traces.append(obs_trace_line)
-            reasoning_text = (
-                f"{reasoning_text}\n\n{obs_trace_line}".strip()
-                if reasoning_text
-                else obs_trace_line
-            )
 
-            if not needs_cont and not inspect_truncated:
-                gateway_logger.info(
-                    f"OBSERVER_CONTENT_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} | mode={output_mode}"
+            if output_mode == "json":
+                # JSON modunda CSV odaklı GOZLEMCI_AJAN ('UrunKodu;Fiyat') ÇAĞRILMAZ; yalnızca fiziksel kesinti varsa doğrudan saf JSON devamı yapılır
+                if not inspect_truncated:
+                    gateway_logger.info(
+                        f"JSON_CONTENT_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} | chars={len(full_content or '')}"
+                    )
+                    break
+                tail_snip = (full_content or "")[-300:]
+                obs_reason = cut_tail or "json_length_truncated"
+                obs_trace_line = (
+                    f"🛡️ [GATEWAY JSON KESİNTİ TAMAMLAMA (Tur {obs_step})]: "
+                    f"Uzunluk={len(full_content or '')} krk | Kesinti=True | Neden={obs_reason}"
                 )
-                break
+                added_traces.append(obs_trace_line)
+                reasoning_text = (
+                    f"{reasoning_text}\n\n{obs_trace_line}".strip()
+                    if reasoning_text
+                    else obs_trace_line
+                )
+                effective_directive = (
+                    f"[OTOMATİK DEVAM — JSON TAMAMLAMA (Tur {obs_step})]\n"
+                    f"Önceki JSON çıktısı karakter sınırında yarıda kesildi. Kesilen son bölüm:\n"
+                    f"{tail_snip}\n\n"
+                    f"KRİTİK KURAL: Önceki alanları tekrarlamadan, CSV veya açıklama metni eklemeden tam kaldığın karakterden itibaren kalan JSON içeriğini yaz ve açık parantezleri (`]`, `}}`) kapat."
+                )
+            else:
+                needs_cont, obs_reason, cont_directive, _ = await asyncio.to_thread(
+                    agent_memory_service.evaluate_with_observer_agent,
+                    self._llm_provider,
+                    self._model_service,
+                    prepared_orig.text_only_messages,
+                    full_content or "",
+                    None,
+                    None,
+                    inspect_truncated,
+                    cut_tail,
+                    output_mode,
+                )
+                gateway_logger.info(
+                    f"OBSERVER_INSPECTION | id={current_job.job_id} | step={obs_step} | mode={output_mode} "
+                    f"| app={current_job.app_id} | agent={current_job.agent_id} "
+                    f"| chars={len(full_content or '')} | truncated={inspect_truncated} "
+                    f"| needs_continuation={needs_cont} | reason={obs_reason}"
+                )
+                obs_trace_line = (
+                    f"🛡️ [GOZLEMCI_AJAN DENETİMİ (Tur {obs_step} - {output_mode.upper()})]: "
+                    f"Uzunluk={len(full_content or '')} krk | Kesinti={inspect_truncated} "
+                    f"| Devam Gerekli Mi={needs_cont} | Neden={obs_reason}"
+                )
+                added_traces.append(obs_trace_line)
+                reasoning_text = (
+                    f"{reasoning_text}\n\n{obs_trace_line}".strip()
+                    if reasoning_text
+                    else obs_trace_line
+                )
 
-            raw_directive = (
-                cont_directive or ""
-            ).strip() or agent_memory_service.get_observer_continuation_directive(
-                tail_snippet=(full_content or "")[-350:],
-                reason=obs_reason or trunc_reason or "incomplete_output",
-            )
-            effective_directive = (
-                raw_directive
-                if raw_directive.startswith(("[GOZLEMCI_AJAN", "[OTOMATİK DEVAM"))
-                else f"[GOZLEMCI_AJAN DEVAM YÖNERGESİ (Tur {obs_step})]\n{raw_directive}\n\nKRİTİK KURAL: Önceki metni veya yapıyı tekrarlamadan tam kaldığın noktadan devam et."
-            )
+                if not needs_cont and not inspect_truncated:
+                    gateway_logger.info(
+                        f"OBSERVER_CONTENT_VERIFIED_COMPLETE | id={current_job.job_id} | step={obs_step} | mode={output_mode}"
+                    )
+                    break
+
+                raw_directive = (
+                    cont_directive or ""
+                ).strip() or agent_memory_service.get_observer_continuation_directive(
+                    tail_snippet=(full_content or "")[-350:],
+                    reason=obs_reason or trunc_reason or "incomplete_output",
+                )
+                effective_directive = (
+                    raw_directive
+                    if raw_directive.startswith(("[GOZLEMCI_AJAN", "[OTOMATİK DEVAM"))
+                    else f"[GOZLEMCI_AJAN DEVAM YÖNERGESİ (Tur {obs_step})]\n{raw_directive}\n\nKRİTİK KURAL: Önceki metni veya yapıyı tekrarlamadan tam kaldığın noktadan devam et."
+                )
+
             cont_messages = (
                 list(base_text_messages)
                 + [
@@ -1353,6 +1386,9 @@ class ChatService:
                 source="api",
                 app_id=current_job.app_id,
                 agent_id=current_job.agent_id,
+                skip_observer=True,
+                gozlemci_devre_disi=True,
+                is_batch_worker=True,
             )
             cont_job = self.initiate_chat_job(cont_req, internal_ctx)
             try:
@@ -1543,7 +1579,7 @@ class ChatService:
                     upstream_fr = str(payload.get("provider_finish_reason") or "stop")
                     is_json_mode = self._formatter.is_json_mode_requested(job.response_format)
 
-                    if job.gozlemci_aktif_mi and status == "success":
+                    if (job.gozlemci_aktif_mi or upstream_fr == "length") and status == "success":
                         if collected_tool_calls:
                             (
                                 updated_tcs,
@@ -2024,6 +2060,7 @@ class ChatService:
 
         image_def = self._model_service.find_image_model(job.model)
         web_def = self._model_service.find_web_model(job.model)
+        base_upstream = job.provider
         upstream_name = job.provider
         finish_reason_holder: List[str] = ["stop"]
 
@@ -2031,14 +2068,21 @@ class ChatService:
             if fr:
                 finish_reason_holder[-1] = str(fr)
 
+        def _on_proxy_used(route: str) -> None:
+            nonlocal upstream_name
+            if route:
+                upstream_name = f"{base_upstream} | proxy: {route}"
+
         try:
             if image_def:
-                upstream_name = f"pollinations-image ({image_def.image_model or 'flux'})"
+                base_upstream = f"pollinations-image ({image_def.image_model or 'flux'})"
+                upstream_name = base_upstream
                 coro = self._run_image_generation_branch(
                     image_def, prepared, channel, session.id
                 )
             elif web_def:
-                upstream_name = f"pollinations-web ({web_def.web_model or 'openai-fast'})"
+                base_upstream = f"pollinations-web ({web_def.web_model or 'openai-fast'})"
+                upstream_name = base_upstream
                 coro = self._run_web_model_branch(
                     web_def,
                     prepared,
@@ -2051,9 +2095,12 @@ class ChatService:
                     tool_choice=job.tool_choice,
                     max_tokens=job.max_tokens,
                     on_finish_reason=_on_provider_finish_reason,
+                    preferred_proxy=session.proxy,
+                    on_proxy_used=_on_proxy_used,
                 )
             else:
-                upstream_name = f"ollama-local ({job.model})"
+                base_upstream = f"ollama-local ({job.model})"
+                upstream_name = base_upstream
                 coro = self._run_local_model_branch(
                     job.model,
                     prepared,
@@ -2194,6 +2241,8 @@ class ChatService:
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
+        preferred_proxy: Optional[str] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """Web AI sağlayıcısını çalıştırır; ulaşılamazsa yerel Ollama yedek modeline düşer."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
@@ -2215,6 +2264,8 @@ class ChatService:
             reasoning_cb,
             max_tokens,
             on_finish_reason,
+            preferred_proxy,
+            on_proxy_used,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -2231,6 +2282,8 @@ class ChatService:
                 reasoning_cb,
                 max_tokens,
                 on_finish_reason,
+                preferred_proxy,
+                on_proxy_used,
             )
         if success:
             return True

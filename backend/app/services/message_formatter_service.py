@@ -769,10 +769,22 @@ class MessageFormatterService:
             )
             return fname, mime_type, fsize, est_tokens, resolved_txt
 
+        preserve_content = bool(
+            part.get("preserve_content") or file_obj.get("preserve_content")
+        )
+        stripped_explicit_early = explicit_content.strip() if explicit_content else ""
+        has_clean_explicit_text = (
+            bool(stripped_explicit_early)
+            and not (stripped_explicit_early.startswith("data:") and ";base64," in stripped_explicit_early[:120])
+            and not stripped_explicit_early.startswith("%PDF-")
+        )
+
         resolved_txt = ""
         decoded_byte_size = 0
 
-        if raw_file_data:
+        if preserve_content and has_clean_explicit_text:
+            resolved_txt = explicit_content
+        elif raw_file_data:
             try:
                 doc_svc = DocumentService()
                 clean_b64 = doc_svc._strip_data_url_header(raw_file_data)
