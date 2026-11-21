@@ -11,6 +11,7 @@ import {
   Activity,
   MonitorCheck,
   Globe,
+  Compass,
 } from 'lucide-react';
 import { Sidebar, type SidebarItem } from '@akalin/ui';
 import { ActiveTab, AdminStateResponseDTO } from '../dtos';
@@ -111,24 +112,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
         },
         children: [
           {
-            id: 'nodes-sessions',
-            label: t('nav.nodesSessions', 'Oturumlar'),
-            path: '/nodes/sessions',
-            icon: <MonitorCheck size={17} />,
-            badge: {
-              text: `${idleSessions}/${state.browser_sessions.length}`,
-              variant: idleSessions > 0 ? 'success' : 'warning',
-            },
-            onClick: (_item, e) => {
-              e.preventDefault();
-              if (onSelectNodesSubSection) {
-                onSelectNodesSubSection('sessions');
-              } else {
-                onSelectTab('nodes');
-              }
-            },
-          },
-          {
             id: 'nodes-proxies',
             label: t('nav.nodesProxies', 'Proxy Listesi'),
             path: '/nodes/proxies',
@@ -144,6 +127,38 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
               } else {
                 onSelectTab('nodes');
               }
+            },
+          },
+        ],
+      },
+      {
+        id: 'browser',
+        label: t('nav.browser', 'Sanal Tarayıcı'),
+        path: '/browser/sessions',
+        icon: <Compass size={20} />,
+        onClick: (_item, e) => {
+          e.preventDefault();
+          onSelectTab('browser');
+        },
+        children: [
+          {
+            id: 'browser-sessions',
+            label: t('nav.browserSessions', 'Oturumlar'),
+            path: '/browser/sessions',
+            icon: <MonitorCheck size={17} />,
+            onClick: (_item, e) => {
+              e.preventDefault();
+              onSelectTab('browser');
+            },
+          },
+          {
+            id: 'browser-settings',
+            label: t('nav.browserSettings', 'Tarayıcı Ayarları'),
+            path: '/browser/settings',
+            icon: <SlidersHorizontal size={17} />,
+            onClick: (_item, e) => {
+              e.preventDefault();
+              onSelectTab('browser');
             },
           },
         ],
@@ -175,14 +190,20 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
 
   const handleIsItemActive = useCallback(
     (item: SidebarItem) => {
-      if (item.id === 'nodes-sessions') {
-        return activeTab === 'nodes' && nodesSubSection === 'sessions';
-      }
       if (item.id === 'nodes-proxies') {
         return activeTab === 'nodes' && nodesSubSection === 'proxies';
       }
       if (item.id === 'nodes') {
         return activeTab === 'nodes' && nodesSubSection === 'dashboard';
+      }
+      if (item.id === 'browser-sessions') {
+        return activeTab === 'browser' && window.location.pathname.includes('/browser/sessions');
+      }
+      if (item.id === 'browser-settings') {
+        return activeTab === 'browser' && window.location.pathname.includes('/browser/settings');
+      }
+      if (item.id === 'browser') {
+        return activeTab === 'browser';
       }
       return item.id === activeTab;
     },

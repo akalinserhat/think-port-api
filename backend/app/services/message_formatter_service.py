@@ -11,39 +11,27 @@ from app.dtos.chat_dto import ChatMessageDTO, PreparedMessagesDTO
 from app.dtos.conversation_dto import ExtractedAttachmentInputDTO
 from app.services.document_service import DocumentService
 
-SYSTEM_INSTRUCTION_HEADER = "[SYSTEM INSTRUCTIONS - MUST FOLLOW STRICTLY]:"
-
-JSON_MODE_ENFORCEMENT_SUFFIX = (
-    "\n\n[CRITICAL OUTPUT FORMAT REQUIREMENT - VALID JSON OBJECT ONLY]:\n"
-    "You MUST respond ONLY with a single valid JSON object (RFC 8259 compliant).\n"
-    "1. Do NOT output any Markdown tables, headings (#), bullet points, greetings, or explanations before or after the JSON.\n"
-    "2. Do NOT wrap the output in ```json or ``` code fences; output raw JSON starting with '{' and ending with '}'.\n"
-    "3. NEVER refuse or claim the input/document is too large or complex; process all sections and return the complete JSON object."
-)
-
 
 class MessageFormatterService:
     """
     Sohbet mesajlarını:
     1) Görsel destekli (Multimodal OpenAI content array) formatına,
     2) Yalnızca metin destekleyen modeller için düz metin (fallback) formatına,
-    3) Sistem yönergelerini (`role: "system"`) ve JSON zorunluluğunu (`response_format`)
-       alt modellere/web otomasyonuna kayıpsız aktaracak zenginleştirilmiş formata,
-    4) Veritabanı kaydı için temiz kullanıcı istemi ve ekli dosya meta verilerine
+    3) Veritabanı kaydı için temiz kullanıcı istemi ve ekli dosya meta verilerine
     dönüştüren tek sorumluluklu servis.
+    Gelen prompt metinlerine kod üzerinden hiçbir ekleme veya çıkarma yapmaz.
     """
 
     def prepare_messages(
         self,
         messages: List[ChatMessageDTO],
         response_format: Optional[Dict[str, Any]] = None,
-        merge_system_into_user: bool = True,
+        merge_system_into_user: bool = False,
     ) -> PreparedMessagesDTO:
         """
         Mesaj listesini hem multimodal hem de yalnızca metin formatına hazırlar.
-        Web otomasyonu ve alt modellerin `system` mesajlarını veya `response_format` JSON
-        zorunluluğunu yoksaymasını önlemek için sistem talimatlarını kullanıcı mesajının
-        en üstüne, JSON format kuralını ise en altına ekler.
+        Gelen system/user mesajlarını kod üzerinden hiçbir prompt eklemesi veya
+        değişikliği yapmadan olduğu gibi aktarır.
         """
         multimodal_msgs: List[Dict[str, Any]] = []
         text_only_msgs: List[Dict[str, str]] = []
@@ -55,13 +43,6 @@ class MessageFormatterService:
             mm_entry, txt_entry = self._format_single_message(msg)
             multimodal_msgs.append(mm_entry)
             text_only_msgs.append(txt_entry)
-
-        if merge_system_into_user and system_instructions:
-            self._inject_system_into_user_messages(multimodal_msgs, text_only_msgs, system_instructions)
-
-        if is_json_mode:
-            json_suffix = self.build_json_enforcement_suffix(response_format)
-            self._append_suffix_to_last_user_message(multimodal_msgs, text_only_msgs, json_suffix)
 
         has_multimodal = multimodal_msgs != text_only_msgs
         return PreparedMessagesDTO(
@@ -99,98 +80,16 @@ class MessageFormatterService:
         return fmt_type in ("json_object", "json_schema", "json")
 
     @classmethod
-    def build_json_enforcement_suffix(cls, response_format: Optional[Dict[str, Any]]) -> str:
-        """`response_format` için prompt sonuna eklenecek kesin JSON şema ve format talimatını üretir."""
-        if not response_format or not isinstance(response_format, dict):
-            return JSON_MODE_ENFORCEMENT_SUFFIX
-
-        schema_obj: Optional[Dict[str, Any]] = None
-        json_schema_field = response_format.get("json_schema")
-        if isinstance(json_schema_field, dict):
-            schema_obj = json_schema_field.get("schema") or json_schema_field
-        elif isinstance(response_format.get("schema"), dict):
-            schema_obj = response_format.get("schema")
-
-        if schema_obj:
-            schema_str = json.dumps(schema_obj, ensure_ascii=False, indent=2)
-            return (
-                f"{JSON_MODE_ENFORCEMENT_SUFFIX}\n"
-                f"Required JSON Schema:\n{schema_str}"
-            )
-        return JSON_MODE_ENFORCEMENT_SUFFIX
-
-    @classmethod
     def ensure_web_messages_have_system_and_json_directives(
         cls,
         openai_messages: List[Dict[str, Any]],
         response_format: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Ham OpenAI mesaj sözlükleri doğrudan Web Gateway'e gönderildiğinde
-        tüm `system` mesajlarının kullanıcı mesajının en üstüne `[SYSTEM INSTRUCTIONS - MUST FOLLOW STRICTLY]: ...`
-        başlığıyla eklendiğinden ve `json_object` modunda JSON zorunluluğunun en sonda yer aldığından emin olur.
+        Gelen OpenAI mesaj dizisini koda gömülü herhangi bir prompt eklemesi veya çıkarması yapmadan
+        olduğu gibi (pass-through) kopyalayarak döner.
         """
-        copied: List[Dict[str, Any]] = [dict(m) for m in openai_messages]
-        sys_chunks: List[str] = []
-        for m in copied:
-            if m.get("role") in ("system", "developer"):
-                content = m.get("content", "")
-                if isinstance(content, str) and content.strip():
-                    sys_chunks.append(content.strip())
-
-        combined_sys = "\n\n".join(sys_chunks).strip()
-        is_json = cls.is_json_mode_requested(response_format)
-        json_suffix = cls.build_json_enforcement_suffix(response_format) if is_json else ""
-
-        # İlk kullanıcı mesajına sistem yönergesini, son kullanıcı mesajına ise JSON zorunluluğunu ekle
-        first_user_idx: Optional[int] = None
-        last_user_idx: Optional[int] = None
-        for idx, msg_item in enumerate(copied):
-            if msg_item.get("role") == "user":
-                if first_user_idx is None:
-                    first_user_idx = idx
-                last_user_idx = idx
-
-        if first_user_idx is None or last_user_idx is None:
-            return copied
-
-        if combined_sys:
-            first_msg = copied[first_user_idx]
-            f_content = first_msg.get("content", "")
-            if isinstance(f_content, str):
-                if SYSTEM_INSTRUCTION_HEADER not in f_content and combined_sys[:80] not in f_content:
-                    first_msg["content"] = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{f_content}"
-            elif isinstance(f_content, list):
-                new_parts = [dict(p) for p in f_content]
-                text_indices = [i for i, p in enumerate(new_parts) if p.get("type") == "text"]
-                if text_indices:
-                    first_ti = text_indices[0]
-                    first_txt = str(new_parts[first_ti].get("text", ""))
-                    if SYSTEM_INSTRUCTION_HEADER not in first_txt and combined_sys[:80] not in first_txt:
-                        new_parts[first_ti]["text"] = f"{SYSTEM_INSTRUCTION_HEADER}\n{combined_sys}\n\n{first_txt}"
-                first_msg["content"] = new_parts
-
-        if json_suffix:
-            last_msg = copied[last_user_idx]
-            l_content = last_msg.get("content", "")
-            if isinstance(l_content, str):
-                if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in l_content:
-                    last_msg["content"] = f"{l_content}{json_suffix}"
-            elif isinstance(l_content, list):
-                new_parts = [dict(p) for p in l_content]
-                text_indices = [i for i, p in enumerate(new_parts) if p.get("type") == "text"]
-                if text_indices:
-                    last_ti = text_indices[-1]
-                    last_txt = str(new_parts[last_ti].get("text", ""))
-                    if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in last_txt:
-                        new_parts[last_ti]["text"] = f"{last_txt}{json_suffix}"
-                last_msg["content"] = new_parts
-
-        # Sistem yönergesi kullanıcı mesajına eklendiği için mükerrer (2x token) gönderimi önlemek adına ayrı system mesajlarını çıkar
-        if combined_sys:
-            copied = [m for m in copied if m.get("role") not in ("system", "developer")]
-
-        return copied
+        return [dict(m) for m in openai_messages]
 
     @classmethod
     def extract_thinking_and_clean_content(cls, raw_text: str) -> Tuple[str, str]:
@@ -302,59 +201,6 @@ class MessageFormatterService:
             except Exception:
                 continue
         return None
-
-    @staticmethod
-    def _inject_system_into_user_messages(
-        multimodal_msgs: List[Dict[str, Any]],
-        text_only_msgs: List[Dict[str, str]],
-        system_instructions: str,
-    ) -> None:
-        """Sistem talimatlarını ilk kullanıcı mesajının en üstüne `[SYSTEM INSTRUCTIONS - MUST FOLLOW STRICTLY]:` başlığıyla ekler."""
-        prefix_block = f"{SYSTEM_INSTRUCTION_HEADER}\n{system_instructions}\n\n"
-        for idx in range(len(text_only_msgs)):
-            if text_only_msgs[idx].get("role") == "user":
-                current_txt = text_only_msgs[idx].get("content", "")
-                if SYSTEM_INSTRUCTION_HEADER not in current_txt and system_instructions[:80] not in current_txt:
-                    text_only_msgs[idx]["content"] = f"{prefix_block}{current_txt}"
-
-                mm_content = multimodal_msgs[idx].get("content")
-                if isinstance(mm_content, str):
-                    if SYSTEM_INSTRUCTION_HEADER not in mm_content and system_instructions[:80] not in mm_content:
-                        multimodal_msgs[idx]["content"] = f"{prefix_block}{mm_content}"
-                elif isinstance(mm_content, list):
-                    for part in mm_content:
-                        if part.get("type") == "text":
-                            ptxt = str(part.get("text", ""))
-                            if SYSTEM_INSTRUCTION_HEADER not in ptxt and system_instructions[:80] not in ptxt:
-                                part["text"] = f"{prefix_block}{ptxt}"
-                            break
-                break
-
-    @staticmethod
-    def _append_suffix_to_last_user_message(
-        multimodal_msgs: List[Dict[str, Any]],
-        text_only_msgs: List[Dict[str, str]],
-        suffix: str,
-    ) -> None:
-        """Verilen zorunlu talimat sonekini son kullanıcı mesajının en sonuna ekler."""
-        for idx in range(len(text_only_msgs) - 1, -1, -1):
-            if text_only_msgs[idx].get("role") == "user":
-                current_txt = text_only_msgs[idx].get("content", "")
-                if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in current_txt:
-                    text_only_msgs[idx]["content"] = f"{current_txt}{suffix}"
-
-                mm_content = multimodal_msgs[idx].get("content")
-                if isinstance(mm_content, str):
-                    if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in mm_content:
-                        multimodal_msgs[idx]["content"] = f"{mm_content}{suffix}"
-                elif isinstance(mm_content, list):
-                    for part in reversed(mm_content):
-                        if part.get("type") == "text":
-                            ptxt = str(part.get("text", ""))
-                            if "[CRITICAL OUTPUT FORMAT REQUIREMENT" not in ptxt:
-                                part["text"] = f"{ptxt}{suffix}"
-                            break
-                break
 
     @classmethod
     def strip_ui_trace_blocks(cls, text: str) -> str:

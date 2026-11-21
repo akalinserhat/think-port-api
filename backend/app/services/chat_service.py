@@ -44,7 +44,13 @@ from app.services.agent_memory_service import (
     agent_memory_service,
     GATEWAY_MEMORY_TOOL_NAMES,
 )
+from app.services.browser_tool_service import (
+    browser_tool_service,
+    GATEWAY_BROWSER_TOOL_NAMES,
+)
 from app.repositories.postgres_db import postgres_db
+
+ALL_GATEWAY_TOOL_NAMES = GATEWAY_MEMORY_TOOL_NAMES | GATEWAY_BROWSER_TOOL_NAMES
 
 
 class ChatService:
@@ -157,6 +163,14 @@ class ChatService:
                 )
                 if injected_tools:
                     request.tools = injected_tools
+
+                # Sanal Tarayıcı (akalin-browser-module) araç yetkisi kontrolü ve enjeksiyonu
+                browser_tools = browser_tool_service.inject_browser_tools(
+                    existing_tools=request.tools,
+                    agent_config=agent_cfg,
+                )
+                if browser_tools:
+                    request.tools = browser_tools
                 if mem_instruction and request.messages:
                     sys_msg = next((m for m in request.messages if m.role in ("system", "developer")), None)
                     if sys_msg and isinstance(sys_msg.content, str):
@@ -362,6 +376,7 @@ class ChatService:
             response_format=normalized_rf,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
+            reasoning_effort=request.reasoning_effort,
             app_id=norm_app,
             agent_id=norm_agent,
             gozlemci_aktif_mi=gozlemci_aktif_mi,
@@ -392,8 +407,8 @@ class ChatService:
         current_job = job
         full_content, completion_tokens, _, _, tool_calls, reasoning_text = await self._collect_full_response(current_job)
 
-        # 1. Gateway-Seviyesi pgvector Ajan Hafızası Tool Call Yakalama (Maksimum 2 Tur)
-        for _mem_step in range(2):
+        # 1. Gateway-Seviyesi Ajan Hafızası & Sanal Tarayıcı Tool Call Yakalama (Maksimum 10 Tur)
+        for _gw_step in range(10):
             if not tool_calls or not current_job.agent_id:
                 break
             called_names = [
@@ -401,7 +416,11 @@ class ChatService:
                 for tc in tool_calls
                 if isinstance(tc, dict)
             ]
-            if not called_names or not all(n in GATEWAY_MEMORY_TOOL_NAMES for n in called_names):
+            if not called_names or not all(n in ALL_GATEWAY_TOOL_NAMES for n in called_names):
+                break
+
+            has_browser = any(n in GATEWAY_BROWSER_TOOL_NAMES for n in called_names)
+            if not has_browser and _gw_step >= 2:
                 break
 
             followup_messages = list(current_job.messages)
@@ -416,14 +435,25 @@ class ChatService:
                 fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
                 fn_name = str(fn.get("name") or "")
                 fn_args = fn.get("arguments")
-                call_id = str(tc.get("id") or f"call_mem_{uuid.uuid4().hex[:8]}")
-                tool_out = agent_memory_service.execute_gateway_memory_tool(
-                    tool_name=fn_name,
-                    raw_arguments=fn_args,
-                    app_id=current_job.app_id,
-                    agent_id=current_job.agent_id,
-                    conversation_id=current_job.conversation_id,
-                )
+                call_id = str(tc.get("id") or f"call_gw_{uuid.uuid4().hex[:8]}")
+
+                if fn_name in GATEWAY_BROWSER_TOOL_NAMES:
+                    tool_out = browser_tool_service.execute_browser_tool(
+                        tool_name=fn_name,
+                        raw_arguments=fn_args,
+                        conversation_id=current_job.conversation_id or current_job.job_id,
+                        app_id=current_job.app_id,
+                        agent_id=current_job.agent_id,
+                    )
+                else:
+                    tool_out = agent_memory_service.execute_gateway_memory_tool(
+                        tool_name=fn_name,
+                        raw_arguments=fn_args,
+                        app_id=current_job.app_id,
+                        agent_id=current_job.agent_id,
+                        conversation_id=current_job.conversation_id,
+                    )
+
                 followup_messages.append(
                     ChatMessageDTO(
                         role="tool",
@@ -1734,7 +1764,11 @@ class ChatService:
         collected_reasoning: List[str] = []
         collected_tool_calls: List[Dict[str, Any]] = []
         start_time = time.perf_counter()
-        deadline = start_time + float(settings.web_gateway_timeout_sec)
+        is_local_job = job.provider == "local-engine"
+        job_timeout_sec = float(
+            settings.ollama_timeout_sec if is_local_job else settings.web_gateway_timeout_sec
+        )
+        deadline = start_time + job_timeout_sec
         ttft_ms = 0
         used_session = "sess-gpt-01"
         upstream_provider = job.provider
@@ -1749,7 +1783,7 @@ class ChatService:
                     remaining = max(0.1, deadline - time.perf_counter())
                     payload = await asyncio.wait_for(
                         channel.get(),
-                        timeout=min(float(settings.stream_wait_timeout_sec), remaining),
+                        timeout=min(max(float(settings.stream_wait_timeout_sec), job_timeout_sec), remaining),
                     )
                     used_session = payload.get("session_id", used_session)
                     upstream_provider = payload.get("upstream_provider", upstream_provider)
@@ -2050,11 +2084,12 @@ class ChatService:
         if not channel:
             return
 
-        session = self._session_repo.acquire_session_for_provider(job.provider)
+        session_id = f"job-{job.job_id[:8]}"
+        preferred_proxy = None
         prepared = self._formatter.prepare_messages(
             job.messages,
             response_format=job.response_format,
-            merge_system_into_user=not bool(job.tools),
+            merge_system_into_user=False,
         )
         loop = asyncio.get_running_loop()
 
@@ -2078,7 +2113,7 @@ class ChatService:
                 base_upstream = f"pollinations-image ({image_def.image_model or 'flux'})"
                 upstream_name = base_upstream
                 coro = self._run_image_generation_branch(
-                    image_def, prepared, channel, session.id
+                    image_def, prepared, channel, session_id
                 )
             elif web_def:
                 base_upstream = f"pollinations-web ({web_def.web_model or 'openai-fast'})"
@@ -2088,15 +2123,16 @@ class ChatService:
                     prepared,
                     loop,
                     channel,
-                    session.id,
+                    session_id,
                     response_format=job.response_format,
                     temperature=job.temperature,
                     tools=job.tools,
                     tool_choice=job.tool_choice,
                     max_tokens=job.max_tokens,
                     on_finish_reason=_on_provider_finish_reason,
-                    preferred_proxy=session.proxy,
+                    preferred_proxy=preferred_proxy,
                     on_proxy_used=_on_proxy_used,
+                    reasoning_effort=job.reasoning_effort,
                 )
             else:
                 base_upstream = f"ollama-local ({job.model})"
@@ -2106,7 +2142,7 @@ class ChatService:
                     prepared,
                     loop,
                     channel,
-                    session.id,
+                    session_id,
                     response_format=job.response_format,
                     temperature=job.temperature,
                     tools=job.tools,
@@ -2115,9 +2151,14 @@ class ChatService:
                     on_finish_reason=_on_provider_finish_reason,
                 )
 
+            exec_timeout_sec = float(
+                settings.ollama_timeout_sec
+                if (not image_def and not web_def)
+                else settings.web_gateway_timeout_sec
+            )
             success = await asyncio.wait_for(
                 coro,
-                timeout=float(settings.web_gateway_timeout_sec),
+                timeout=exec_timeout_sec,
             )
 
             if not success:
@@ -2131,7 +2172,7 @@ class ChatService:
                         {
                             "event": "delta",
                             "text": err_msg,
-                            "session_id": session.id,
+                            "session_id": session_id,
                             "status": "error",
                             "upstream_provider": upstream_name,
                             "error_detail": err_detail,
@@ -2140,7 +2181,7 @@ class ChatService:
                 await channel.put(
                     {
                         "event": "done",
-                        "session_id": session.id,
+                        "session_id": session_id,
                         "status": "error",
                         "upstream_provider": upstream_name,
                         "error_detail": err_detail,
@@ -2151,7 +2192,7 @@ class ChatService:
             await channel.put(
                 {
                     "event": "done",
-                    "session_id": session.id,
+                    "session_id": session_id,
                     "upstream_provider": upstream_name,
                     "provider_finish_reason": finish_reason_holder[-1],
                 }
@@ -2167,7 +2208,7 @@ class ChatService:
                     {
                         "event": "delta",
                         "text": f"\n[Web AI Gateway Zaman Aşımı: {timeout_detail}]",
-                        "session_id": session.id,
+                        "session_id": session_id,
                         "status": "timeout",
                         "upstream_provider": upstream_name,
                         "error_detail": timeout_detail,
@@ -2176,7 +2217,7 @@ class ChatService:
             await channel.put(
                 {
                     "event": "done",
-                    "session_id": session.id,
+                    "session_id": session_id,
                     "status": "timeout",
                     "upstream_provider": upstream_name,
                     "error_detail": timeout_detail,
@@ -2190,7 +2231,7 @@ class ChatService:
                     {
                         "event": "delta",
                         "text": f"\n[AI Gateway Hatası: {exc}]",
-                        "session_id": session.id,
+                        "session_id": session_id,
                         "status": "error",
                         "error_detail": str(exc),
                     }
@@ -2198,14 +2239,14 @@ class ChatService:
             await channel.put(
                 {
                     "event": "done",
-                    "session_id": session.id,
+                    "session_id": session_id,
                     "status": "error",
                     "upstream_provider": upstream_name,
                     "error_detail": str(exc),
                 }
             )
         finally:
-            self._session_repo.release_session(session.id)
+            pass
 
     async def _run_image_generation_branch(
         self,
@@ -2243,6 +2284,7 @@ class ChatService:
         on_finish_reason: Optional[Callable[[str], None]] = None,
         preferred_proxy: Optional[str] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> bool:
         """Web AI sağlayıcısını çalıştırır; ulaşılamazsa yerel Ollama yedek modeline düşer."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
@@ -2266,6 +2308,7 @@ class ChatService:
             on_finish_reason,
             preferred_proxy,
             on_proxy_used,
+            reasoning_effort,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -2284,6 +2327,7 @@ class ChatService:
                 on_finish_reason,
                 preferred_proxy,
                 on_proxy_used,
+                reasoning_effort,
             )
         if success:
             return True
@@ -2322,6 +2366,7 @@ class ChatService:
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> bool:
         """Yerel Ollama modelinden akış alır; Ollama kapalıysa otomatik olarak Web AI köprüsünü kullanır."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
@@ -2340,6 +2385,9 @@ class ChatService:
             reasoning_cb,
             max_tokens,
             on_finish_reason,
+            None,
+            None,
+            reasoning_effort,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -2373,6 +2421,9 @@ class ChatService:
             reasoning_cb,
             max_tokens,
             on_finish_reason,
+            None,
+            None,
+            reasoning_effort,
         )
 
     @staticmethod

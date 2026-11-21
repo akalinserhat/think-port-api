@@ -85,7 +85,7 @@ export const getChatStudioDefaultValues = (
     (k) => k.raw_preview && k.raw_preview.trim() === apiKey.trim()
   );
   const initialUserId = matchedKey ? matchedKey.user_id : users[0]?.id || 'sys_usr_01';
-  const defaultModelId = selectedModelId || models[0]?.id || 'gpt-4o';
+  const defaultModelId = selectedModelId || models[0]?.id || 'gpt-oss:20b';
 
   return {
     viewMode: 'list',

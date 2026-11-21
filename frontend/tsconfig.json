@@ -32,6 +32,8 @@
       "@akalin/user-auth-module": ["../../akalin-user-auth-module/src/index.ts"],
       "@akalin/proxy_module": ["../../akalin-proxy-module/src/index.ts"],
       "@akalin/proxy-module": ["../../akalin-proxy-module/src/index.ts"],
+      "@akalin/browser_module": ["../../akalin-browser-module/src/index.ts"],
+      "@akalin/browser-module": ["../../akalin-browser-module/src/index.ts"],
       "react": ["./node_modules/@types/react"],
       "react/*": ["./node_modules/@types/react/*"],
       "react-dom": ["./node_modules/@types/react-dom"],

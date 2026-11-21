@@ -625,19 +625,28 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
 
   // Sistemdeki AI modellerini BaseChatPage'in ChatAgent formatına dönüştür
   const chatAgents: ChatAgent[] = useMemo(() => {
-    if (!models || models.length === 0) {
+    // SADECE sohbet (chat) amaçlı ve aktif modelleri al (görsel ve embedding modelleri hariç)
+    const chatOnlyModels = (models || []).filter(
+      (m) =>
+        !m.is_image &&
+        m.type !== 'image' &&
+        m.type !== 'embedding' &&
+        m.available !== false
+    );
+
+    if (chatOnlyModels.length === 0) {
       return [
         {
-          id: 'gpt-4o',
-          ad: 'GPT-4o',
-          rol: 'OpenAI',
-          modelAdi: 'gpt-4o',
-          saglayiciTuruAdi: 'chatgpt-web',
+          id: 'gpt-oss:20b',
+          ad: 'GPT-OSS 20B',
+          rol: 'Open Source',
+          modelAdi: 'gpt-oss:20b',
+          saglayiciTuruAdi: 'web-ai',
           isLocal: false,
         },
       ];
     }
-    return models.map((m) => ({
+    return chatOnlyModels.map((m) => ({
       id: m.id,
       ad: m.name.replace(/\s*\(Web Gateway\)\s*/i, '').trim(),
       rol: m.vendor,

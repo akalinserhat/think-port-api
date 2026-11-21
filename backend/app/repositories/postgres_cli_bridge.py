@@ -2381,10 +2381,7 @@ def get_openai_models_list_bridge(params: Dict[str, Any]) -> Dict[str, Any]:
         # 2. Web models
         if model_type in (None, "chat"):
             web_defs = [
-                ("gpt-4o", "GPT-4o (Web Gateway)", "OpenAI", "chatgpt-web", "Web AI", "OpenAI GPT-4o web oturumu (yüksek hızlı Web AI köprüsü)."),
-                ("claude-3-5-sonnet", "Claude 3.5 Sonnet (Web Gateway)", "Anthropic", "claude-web", "Web AI", "Anthropic Claude 3.5 Sonnet web oturumu köprüsü."),
-                ("deepseek-r1", "DeepSeek R1 (Web Gateway)", "DeepSeek", "deepseek-web", "Reasoning", "DeepSeek R1 düşünce zinciri (Chain-of-Thought) web köprüsü."),
-                ("gemini-2.5-pro", "Gemini 2.5 Pro (Web Gateway)", "Google", "gemini-web", "Web AI", "Google Gemini 2.5 Pro web oturumu köprüsü."),
+                ("gpt-oss:20b", "GPT-OSS 20B", "Open Source (OpenAI OSS)", "web-ai", "Web AI", "GPT-OSS 20B açık kaynak büyük dil modeli (Web AI ağ geçidi üzerinden yüksek hızlı akış)."),
             ]
             for mid, mname, vendor, prov, badge, desc in web_defs:
                 items.append({
@@ -3155,9 +3152,9 @@ def list_ai_providers() -> List[Dict[str, Any]]:
     web_models = [str(m["id"]) for m in model_items if not m.get("is_local") and m.get("id")]
 
     if not all_chat_models:
-        all_chat_models = ["gpt-4o", "claude-3-5-sonnet", "deepseek-r1", "gemini-2.5-pro"]
+        all_chat_models = ["gpt-oss:20b"]
     if not web_models:
-        web_models = ["gpt-4o", "claude-3-5-sonnet", "deepseek-r1", "gemini-2.5-pro"]
+        web_models = ["gpt-oss:20b"]
 
     return [
         {

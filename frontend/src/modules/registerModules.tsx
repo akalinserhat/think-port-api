@@ -14,6 +14,7 @@ import {
 import { createGlobalSearchModule } from '@akalin/global_search_module';
 import { createAuthModule } from '@akalin/user_auth_module';
 import { createProxyModule, createRestProxyAdapter } from '@akalin/proxy_module';
+import { createBrowserModule, RestBrowserServiceAdapter } from '@akalin/browser_module';
 
 let isInitialized = false;
 
@@ -90,6 +91,18 @@ export function initializeGatewayModules(): void {
     },
   });
   ModuleRegistry.register(proxyModule);
+
+  // 2.c) @akalin/browser_module — Sanal Tarayıcı & AI Web Otomasyon Modülü
+  const browserModule = createBrowserModule({
+    id: 'browser-module',
+    baseRoute: '/browser',
+    adapter: new RestBrowserServiceAdapter('/api/browser'),
+    onNotify: (msg, type) => {
+      if (type === 'error') toast.error(msg);
+      else toast.success(msg);
+    },
+  });
+  ModuleRegistry.register(browserModule);
 
   // 3) Yapay Zeka & Gözlemci Ajan Yönetimi Modülü (MCP Ağacı ve Form Seçicileri için)
   ModuleRegistry.register({

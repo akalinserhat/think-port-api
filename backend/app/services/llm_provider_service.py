@@ -260,15 +260,14 @@ class LlmProviderService:
         on_finish_reason: Optional[Callable[[str], None]] = None,
         preferred_proxy: Optional[str] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> bool:
         """
         Web AI sağlayıcısından (text.pollinations.ai/openai) gerçek zamanlı SSE akışı okur.
         @akalin/proxy_module üzerinden her isteği bağımsız proxy IP'lerinden paralel geçirir.
+        Gelen mesajlara koda gömülü hiçbir prompt eklemesi veya performans kısıtlaması yapmaz.
         """
-        enriched_messages = MessageFormatterService.ensure_web_messages_have_system_and_json_directives(
-            openai_messages,
-            response_format=None if tools else response_format,
-        )
+        enriched_messages = [dict(m) for m in openai_messages]
         target_upstream = (
             "openai-fast"
             if web_model in ("openai", "gemini", "claude-hybridspace", "deepseek-r1", "openai-fast")
@@ -302,6 +301,7 @@ class LlmProviderService:
             on_finish_reason=on_finish_reason,
             preferred_proxy=preferred_proxy,
             on_proxy_used=on_proxy_used,
+            reasoning_effort=reasoning_effort,
         ):
             return True
 
@@ -335,15 +335,14 @@ class LlmProviderService:
         on_finish_reason: Optional[Callable[[str], None]] = None,
         preferred_proxy: Optional[str] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
+        reasoning_effort: Optional[str] = None,
         _retry_count: int = 0,
     ) -> bool:
         """text.pollinations.ai/openai uç noktasından çoklu proxy IP tüneli ile chunked-safe SSE yanıtı okur."""
         t0 = time.perf_counter()
-        effort: Optional[str] = (
-            "low"
-            if bool(tools)
-            else ("high" if requested_model_id == "deepseek-r1" else "low")
-        )
+        # Performans kısıtlaması (effort='low' vb.) yalnızca istemci/AdminUI açıkça gönderdiyse uygulanır;
+        # aksi durumda modelin doğal tam kapasitesi kullanılır.
+        effort: Optional[str] = reasoning_effort.strip() if isinstance(reasoning_effort, str) and reasoning_effort.strip() else None
         captured_finish_reason: List[str] = ["stop"]
         last_stream_error: List[str] = [""]
         last_route_used: List[str] = [""]
@@ -370,30 +369,8 @@ class LlmProviderService:
             )
         )
 
-        effective_msgs = openai_messages
-        if requested_model_id != "deepseek-r1" and openai_messages:
-            effective_msgs = [dict(m) for m in openai_messages]
-            last_m = dict(effective_msgs[-1])
-            no_draft_hint = (
-                "\n\n[CRITICAL TOOL DIRECTIVE: Do NOT draft, list, or rehearse items inside internal "
-                "reasoning/thinking! Keep internal thinking under 1 short sentence and write all output directly inside the tool call arguments.]"
-                if tools
-                else "\n\n[CRITICAL STREAMING DIRECTIVE: Do NOT analyze, count, verify, or draft rows inside your internal "
-                "reasoning/thinking! Keep internal thinking under 1 short sentence and write all output directly in content.]"
-            )
-            marker = "CRITICAL TOOL DIRECTIVE" if tools else "CRITICAL STREAMING DIRECTIVE"
-            if isinstance(last_m.get("content"), str) and marker not in last_m["content"]:
-                last_m["content"] = last_m["content"] + no_draft_hint
-            elif isinstance(last_m.get("content"), list):
-                new_parts = [dict(p) for p in last_m["content"]]
-                for p in reversed(new_parts):
-                    if p.get("type") == "text":
-                        txt_val = str(p.get("text") or "")
-                        if marker not in txt_val:
-                            p["text"] = txt_val + no_draft_hint
-                        break
-                last_m["content"] = new_parts
-            effective_msgs[-1] = last_m
+        # Prompt metinlerine kod üzerinden hiçbir ekleme veya çıkarma yapılmaz.
+        effective_msgs = [dict(m) for m in openai_messages]
 
         excluded_endpoints: Set[str] = set()
         max_attempts = 5
@@ -558,7 +535,7 @@ class LlmProviderService:
                         pass
 
                     joined_attempt_text = "".join(attempt_deltas).strip()
-                    # Eğer model token bütçesini içsel düşünceye harcayıp kısa/yarım bir JSON/metinle 'length' kesintisine uğradıysa effort='low' korunarak farklı kanaldan temiz tekrar denenir
+                    # Erken 'length' kesintisi varsa farklı kanaldan mevcut ayarlarla (performansı kısmadan) tekrar dene
                     if (
                         attempt_finish[0] == "length"
                         and not attempt_tool_calls
@@ -573,11 +550,9 @@ class LlmProviderService:
                                 attempt_finish[0],
                                 route_label,
                             )
-                        if requested_model_id != "deepseek-r1" and effort is not None:
-                            effort = "low"
                         gateway_logger.warning(
                             f"GATEWAY_SELF_HEAL_LENGTH | Erken kesilme algılandı (krk={len(joined_attempt_text)}, proxy='{route_label}'), "
-                            f"effort='{effort}' korunarak gateway içinde yeniden tamamlanıyor ({attempt_idx + 1}/{max_attempts})..."
+                            f"farklı kanaldan tekrar deneniyor ({attempt_idx + 1}/{max_attempts})..."
                         )
                         sleep_after_release = 0.2
                         continue
@@ -818,11 +793,7 @@ class LlmProviderService:
                 flattened.append(
                     {
                         "role": "user",
-                        "content": (
-                            f"[ARAÇ ÇALIŞTIRMA SONUCU ({tool_name})]:\n{tool_content}\n\n"
-                            "[SİSTEM NOTU: Yukarıdaki araç çıktısı başarıyla alındı. Aynı parametrelerle aynı aracı "
-                            "tekrar ÇAĞIRMAYINIZ; gerekli veriler tamamlandıysa doğrudan nihai yanıtı üretiniz.]"
-                        ),
+                        "content": f"[ARAÇ ÇALIŞTIRMA SONUCU ({tool_name})]:\n{tool_content}",
                     }
                 )
             else:
@@ -864,9 +835,7 @@ class LlmProviderService:
         if seed is not None:
             body["seed"] = seed
         if max_tokens is not None and max_tokens > 0:
-            body["max_tokens"] = min(max(int(max_tokens), 8192) if tools else int(max_tokens), 16384)
-        elif tools and not force_stream:
-            body["max_tokens"] = 16384
+            body["max_tokens"] = int(max_tokens)
         if MessageFormatterService.is_json_mode_requested(response_format):
             body["response_format"] = {"type": "json_object"}
         return json.dumps(body).encode("utf-8")

@@ -255,7 +255,7 @@ class ModelService:
         """
         raw = (requested_model or "").strip()
         if not raw:
-            return "gpt-4o"
+            return "gpt-oss:20b"
 
         lower = raw.lower()
         # Tedarikçi öneki varsa temizlenmiş halini de hazırla (örn. 'openai/gpt-4o-mini' -> 'gpt-4o-mini')
@@ -280,14 +280,16 @@ class ModelService:
 
         # 3. Aile / Önek (Wildcard) tabanlı eşleştirme
         for candidate in (lower, stripped):
+            if candidate.startswith(("gpt-oss", "openai-fast")):
+                return "gpt-oss:20b"
             if candidate.startswith(("claude-3-5-sonnet", "claude-3.5-sonnet", "claude-3-7-sonnet", "claude-3.7-sonnet", "claude-3", "claude-sonnet", "claude-opus", "claude-haiku", "claude")):
-                return "claude-3-5-sonnet"
+                return "gpt-oss:20b"
             if candidate.startswith(("gemini-", "gemini")):
-                return "gemini-2.5-pro"
+                return "gpt-oss:20b"
             if candidate.startswith(("deepseek-", "deepseek")):
-                return "deepseek-r1"
+                return "gpt-oss:20b"
             if candidate.startswith(("gpt-4", "gpt-3.5", "gpt-", "chatgpt-", "o1", "o3", "o4")):
-                return "gpt-4o"
+                return "gpt-oss:20b"
             if candidate.startswith("flux-realism"):
                 return "flux-realism"
             if candidate.startswith("flux-anime"):
@@ -299,7 +301,7 @@ class ModelService:
             if candidate.startswith(("sdxl", "turbo")):
                 return "turbo"
 
-        # 4. Yerel model formatındaysa ancak kurulu değilse mevcut en iyi yerel modeli veya gpt-4o'yu seç
+        # 4. Yerel model formatındaysa ancak kurulu değilse mevcut en iyi yerel modeli veya gpt-oss:20b'yi seç
         local_models = self.discover_local_ollama_models()
         local_ids = [m.id for m in local_models]
         if local_ids:
@@ -309,7 +311,7 @@ class ModelService:
             if ":" in raw:
                 return local_ids[0]
 
-        return "gpt-4o"
+        return "gpt-oss:20b"
 
     def resolve_provider_for_model(self, model_id: str) -> str:
         """Model ID'sine (veya takma adına) karşılık gelen sağlayıcı (provider) adını çözer."""
@@ -346,6 +348,8 @@ class ModelService:
 
     def _is_provider_available(self, provider: str) -> bool:
         """Belirtilen sağlayıcının aktif bir oturumu veya API anahtarı olup olmadığını denetler."""
+        if provider in ("web-ai", "pollinations-web", "pollinations-image", "chatgpt-web"):
+            return True
         if provider == "local-engine":
             return len(self._get_cached_ollama_tags()) > 0
         if provider == "external-api":

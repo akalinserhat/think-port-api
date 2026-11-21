@@ -45,6 +45,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
     users: t('nav.users'),
     keys: t('nav.keys'),
     nodes: t('nav.nodes'),
+    browser: t('nav.browser', 'Sanal Tarayıcı'),
     settings: t('nav.settings'),
   };
 
@@ -77,7 +78,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
         onClick: () => navigate('/chat'),
       });
       if (headerBreadcrumbOptions?.subTrail && headerBreadcrumbOptions.subTrail.length > 0) {
-        headerBreadcrumbOptions.subTrail.forEach((sub, idx, arr) => {
+        headerBreadcrumbOptions.subTrail.forEach((sub: any, idx: number, arr: any[]) => {
           baseItems.push({
             label: sub.label,
             onClick: sub.onClick,

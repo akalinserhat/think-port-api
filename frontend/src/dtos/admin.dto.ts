@@ -452,7 +452,7 @@ export interface AdminStateResponseDTO {
   pool_dashboard?: PoolDashboardMetricsDTO;
 }
 
-export type ActiveTab = 'chat' | 'overview' | 'users' | 'keys' | 'nodes' | 'settings';
+export type ActiveTab = 'chat' | 'overview' | 'users' | 'keys' | 'nodes' | 'browser' | 'settings';
 export type ThemeMode = 'light' | 'dark';
 export type SupportedLanguage = 'tr' | 'en';
 

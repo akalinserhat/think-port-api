@@ -59,12 +59,16 @@ export const adminService = {
 
   /** Model listesi içinden geçerli veya varsayılan en uygun modeli seçer. */
   selectPreferredModelId(models: AIModelDTO[] | undefined, currentModelId: string): string {
-    const safeModels = Array.isArray(models) ? models : [];
+    const safeModels = Array.isArray(models)
+      ? models.filter((m) => !m.is_image && m.type !== 'image' && m.type !== 'embedding' && m.available !== false)
+      : [];
     if (currentModelId && safeModels.some((m) => m.id === currentModelId)) {
       return currentModelId;
     }
+    const gptOss = safeModels.find((m) => m.id.includes('gpt-oss') || m.name.toLowerCase().includes('gpt-oss'));
+    if (gptOss) return gptOss.id;
     const fastLocal =
       safeModels.find((m) => m.id.includes('7b') || m.id.includes('llama3')) || safeModels[0];
-    return fastLocal ? fastLocal.id : currentModelId;
+    return fastLocal ? fastLocal.id : currentModelId || 'gpt-oss:20b';
   },
 };

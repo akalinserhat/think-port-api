@@ -21,7 +21,7 @@ class AppConfig:
     )
     ollama_host: str = os.getenv("OLLAMA_HOST", "127.0.0.1")
     ollama_port: int = int(os.getenv("OLLAMA_PORT", "11434"))
-    ollama_timeout_sec: int = int(os.getenv("OLLAMA_TIMEOUT_SEC", "240"))
+    ollama_timeout_sec: int = int(os.getenv("OLLAMA_TIMEOUT_SEC", "360"))
     ollama_discovery_timeout_sec: float = float(os.getenv("OLLAMA_DISCOVERY_TIMEOUT_SEC", "2.0"))
     pollinations_host: str = "text.pollinations.ai"
     pollinations_timeout_sec: int = int(os.getenv("POLLINATIONS_TIMEOUT_SEC", "120"))

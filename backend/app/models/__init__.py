@@ -9,6 +9,7 @@ from app.models.base_model import (
 )
 from app.models.registry import ThinkPortModelRegistry, model_registry, DEFAULT_REGISTERED_MODELS
 from app.models.definitions import (
+    GptOss20BModel,
     Gpt4oModel,
     Claude35SonnetModel,
     DeepSeekR1Model,
@@ -29,6 +30,7 @@ __all__ = [
     "ThinkPortModelRegistry",
     "model_registry",
     "DEFAULT_REGISTERED_MODELS",
+    "GptOss20BModel",
     "Gpt4oModel",
     "Claude35SonnetModel",
     "DeepSeekR1Model",

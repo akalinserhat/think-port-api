@@ -55,6 +55,7 @@ class ChatCompletionRequestDTO(BaseModel):
     max_tokens: Optional[int] = Field(default=None)
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
+    reasoning_effort: Optional[str] = Field(default=None)
     response_format: Optional[Union[ResponseFormatDTO, Dict[str, Any], str]] = None
     user: Optional[str] = None
     conversation_id: Optional[str] = None
@@ -174,6 +175,7 @@ class ChatJobDTO(BaseModel):
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
+    reasoning_effort: Optional[str] = None
     app_id: str = ""
     agent_id: str = ""
     gozlemci_aktif_mi: bool = True

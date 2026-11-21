@@ -12,8 +12,15 @@ import { NodesPoolView } from './components/NodesPoolView';
 import { SettingsView } from './components/SettingsView';
 import { LoginView } from './components/LoginView';
 import {
+  BrowserSessionsPage,
+  BrowserSessionsPageSettingsForExternal,
+  BrowserProvider,
+  RestBrowserServiceAdapter,
+} from '@akalin/browser_module';
+import {
   ActiveTab,
   AdminStateResponseDTO,
+  ApiKeyRecordDTO,
   BrowserSessionDTO,
   CreateBrowserSessionRequestDTO,
   GatewaySettingsDTO,
@@ -28,12 +35,15 @@ import {
 } from './services';
 import { ModelRegistry } from './models';
 
+const browserAdapter = new RestBrowserServiceAdapter('/api/browser');
+
 const TAB_ROUTES: Record<ActiveTab, string> = {
   chat: '/chat',
   overview: '/overview',
   users: '/users',
   keys: '/keys',
   nodes: '/nodes',
+  browser: '/browser/sessions',
   settings: '/settings',
 };
 
@@ -42,6 +52,8 @@ function resolveTabFromPathname(pathname: string): ActiveTab {
   if (clean.startsWith('/overview')) return 'overview';
   if (clean.startsWith('/users')) return 'users';
   if (clean.startsWith('/keys')) return 'keys';
+  if (clean.startsWith('/nodes/sessions')) return 'browser';
+  if (clean.startsWith('/browser')) return 'browser';
   if (clean.startsWith('/nodes')) return 'nodes';
   if (clean.startsWith('/settings')) return 'settings';
   return 'chat';
@@ -149,7 +161,6 @@ export const App: React.FC = () => {
   const nodesSubSection = useMemo<NodesSubSection>(() => {
     const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '') || '/';
     if (clean.startsWith('/nodes/proxies')) return 'proxies';
-    if (clean.startsWith('/nodes/sessions')) return 'sessions';
     return 'dashboard';
   }, [location.pathname]);
 
@@ -174,8 +185,11 @@ export const App: React.FC = () => {
   );
 
   useEffect(() => {
-    if (location.pathname === '/' || location.pathname === '/admin') {
+    const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '') || '/';
+    if (clean === '/' || location.pathname === '/admin') {
       navigate('/chat', { replace: true });
+    } else if (clean.startsWith('/nodes/sessions')) {
+      navigate('/browser/sessions', { replace: true });
     }
   }, [location.pathname, navigate]);
 
@@ -629,6 +643,16 @@ export const App: React.FC = () => {
               onRefreshState={refreshState}
               onShowToast={showToast}
             />
+          )}
+
+          {activeTab === 'browser' && (
+            <BrowserProvider adapter={browserAdapter}>
+              {location.pathname.includes('/browser/settings') ? (
+                <BrowserSessionsPageSettingsForExternal />
+              ) : (
+                <BrowserSessionsPage />
+              )}
+            </BrowserProvider>
           )}
 
           {activeTab === 'settings' && (

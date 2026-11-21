@@ -44,6 +44,9 @@ const resources = {
         nodes: 'Bağlantı Havuzu',
         nodesSessions: 'Oturumlar',
         nodesProxies: 'Proxy Listesi',
+        browser: 'Sanal Tarayıcı',
+        browserSessions: 'Oturumlar',
+        browserSettings: 'Tarayıcı Ayarları',
         settings: 'Sistem Ayarları',
       },
       status: {
@@ -519,6 +522,9 @@ const resources = {
         nodes: 'Connection Pool',
         nodesSessions: 'Sessions',
         nodesProxies: 'Proxy List',
+        browser: 'Virtual Browser',
+        browserSessions: 'Sessions',
+        browserSettings: 'Browser Settings',
         settings: 'System Settings',
       },
       status: {

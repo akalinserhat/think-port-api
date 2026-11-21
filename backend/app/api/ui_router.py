@@ -40,6 +40,8 @@ def _load_dashboard_html() -> str:
 @router.get("/keys/{subpath:path}", response_class=HTMLResponse)
 @router.get("/nodes", response_class=HTMLResponse)
 @router.get("/nodes/{subpath:path}", response_class=HTMLResponse)
+@router.get("/browser", response_class=HTMLResponse)
+@router.get("/browser/{subpath:path}", response_class=HTMLResponse)
 @router.get("/settings", response_class=HTMLResponse)
 @router.get("/settings/{subpath:path}", response_class=HTMLResponse)
 async def serve_admin_dashboard(subpath: str = "") -> HTMLResponse:

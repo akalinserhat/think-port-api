@@ -108,6 +108,7 @@ class AgentMemoryService:
                 "hafiza_arama_top_k": 5,
                 "gozlemci_aktif_mi": True,
                 "gozlemci_devre_disi": False,
+                "secili_arac_kodlari": [],
                 "sistem_istemi": "",
             }
 
@@ -116,7 +117,7 @@ class AgentMemoryService:
                 """
                 SELECT id, uygulama_id, ad, kod, sistem_istemi, kurallar_json,
                        hafiza_aktif_mi, hafiza_max_kayit, hafiza_saklama_gun,
-                       hafiza_arama_top_k, gozlemci_aktif_mi, aktif_mi
+                       hafiza_arama_top_k, gozlemci_aktif_mi, secili_arac_kodlari_json, aktif_mi
                 FROM ai_agents
                 WHERE LOWER(TRIM(uygulama_id)) = LOWER(TRIM(?))
                   AND LOWER(TRIM(kod)) = LOWER(TRIM(?))
@@ -131,7 +132,7 @@ class AgentMemoryService:
                     """
                     SELECT id, uygulama_id, ad, kod, sistem_istemi, kurallar_json,
                            hafiza_aktif_mi, hafiza_max_kayit, hafiza_saklama_gun,
-                           hafiza_arama_top_k, gozlemci_aktif_mi, aktif_mi
+                           hafiza_arama_top_k, gozlemci_aktif_mi, secili_arac_kodlari_json, aktif_mi
                     FROM ai_agents
                     WHERE LOWER(TRIM(kod)) = LOWER(TRIM(?))
                     LIMIT 1
@@ -181,8 +182,15 @@ class AgentMemoryService:
                     "hafiza_arama_top_k": 5,
                     "gozlemci_aktif_mi": True,
                     "gozlemci_devre_disi": False,
+                    "secili_arac_kodlari": list(GATEWAY_MEMORY_TOOL_NAMES),
                     "sistem_istemi": "",
                 }
+
+            tools_raw = row.get("secili_arac_kodlari_json") or "[]"
+            try:
+                selected_tools = json.loads(tools_raw) if isinstance(tools_raw, str) else list(tools_raw)
+            except Exception:
+                selected_tools = []
 
             return {
                 "id": int(row["id"]),
@@ -194,6 +202,7 @@ class AgentMemoryService:
                 "hafiza_arama_top_k": int(row.get("hafiza_arama_top_k") or 5),
                 "gozlemci_aktif_mi": bool(row.get("gozlemci_aktif_mi") if row.get("gozlemci_aktif_mi") is not None else 1),
                 "gozlemci_devre_disi": not bool(row.get("gozlemci_aktif_mi") if row.get("gozlemci_aktif_mi") is not None else 1),
+                "secili_arac_kodlari": selected_tools,
                 "sistem_istemi": str(row.get("sistem_istemi") or ""),
             }
 

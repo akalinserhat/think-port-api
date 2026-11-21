@@ -2,6 +2,7 @@
 ThinkPort AI Gateway - Bireysel Model Tanımları Paketi (definitions/__init__.py).
 Her yapay zeka modeli kendi bağımsız kod dosyasında IThinkPortModel arayüzünü uygular.
 """
+from app.models.definitions.gpt_oss_20b_model import GptOss20BModel
 from app.models.definitions.gpt_4o_model import Gpt4oModel
 from app.models.definitions.claude_35_sonnet_model import Claude35SonnetModel
 from app.models.definitions.deepseek_r1_model import DeepSeekR1Model
@@ -15,6 +16,7 @@ from app.models.definitions.ollama_local_model import OllamaLocalModel
 from app.models.definitions.bge_m3_model import BgeM3EmbeddingModel
 
 __all__ = [
+    "GptOss20BModel",
     "Gpt4oModel",
     "Claude35SonnetModel",
     "DeepSeekR1Model",

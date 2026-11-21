@@ -1374,6 +1374,10 @@ export default defineConfig({
         replacement: path.resolve(__dirname, '../../akalin-proxy-module/src/index.ts'),
       },
       {
+        find: /^@akalin\/browser[-_]module$/,
+        replacement: path.resolve(__dirname, '../../akalin-browser-module/src/index.ts'),
+      },
+      {
         find: 'react/jsx-runtime',
         replacement: path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
       },

@@ -18,6 +18,7 @@ from app.api.admin.users_router import router as admin_users_router
 from app.api.admin.api_keys_router import router as admin_api_keys_router
 from app.api.admin.proxies_router import router as admin_proxies_router
 from app.api.admin.conversations_router import router as admin_conversations_router
+from app.api.browser_proxy_router import router as browser_proxy_router
 from app.api.ui_router import router as ui_router
 
 
@@ -77,6 +78,7 @@ def register_routers(application: FastAPI) -> None:
     application.include_router(admin_users_router)
     application.include_router(admin_api_keys_router)
     application.include_router(admin_proxies_router)
+    application.include_router(browser_proxy_router)
     application.include_router(admin_conversations_router)
     application.include_router(ui_router)
 

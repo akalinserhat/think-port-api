@@ -7,6 +7,7 @@
  */
 
 import { IThinkPortModel } from '../IThinkPortModel';
+import { GptOss20BModel, gptOss20BModel } from './GptOss20BModel';
 import { Gpt4oModel, gpt4oModel } from './Gpt4oModel';
 import { Claude35SonnetModel, claude35SonnetModel } from './Claude35SonnetModel';
 import { DeepSeekR1Model, deepSeekR1Model } from './DeepSeekR1Model';
@@ -23,6 +24,8 @@ import { DynamicOllamaModelAdapter } from './DynamicOllamaModelAdapter';
 import { CustomModelAdapter } from './CustomModelAdapter';
 
 export {
+  GptOss20BModel,
+  gptOss20BModel,
   Gpt4oModel,
   gpt4oModel,
   Claude35SonnetModel,
@@ -53,14 +56,10 @@ export {
 
 /**
  * Sistemde yerleşik olarak tanımlı tüm IThinkPortModel örnekleri.
+ * Yalnızca gerçekte var olan ve aktif modeller kayıtlıdır.
  */
 export const BUILTIN_THINKPORT_MODELS: readonly IThinkPortModel[] = [
-  gpt4oModel,
-  claude35SonnetModel,
-  deepSeekR1Model,
-  gemini25ProModel,
-  qwen25LocalModel,
-  gemma4LocalModel,
+  gptOss20BModel,
   flux1Model,
   fluxRealismModel,
   fluxAnimeModel,

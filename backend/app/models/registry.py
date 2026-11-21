@@ -9,10 +9,7 @@ Yeni bir yapay zeka modeli eklemek için:
 from typing import Any, Dict, List, Optional
 from app.models.base_model import IThinkPortModel
 from app.models.definitions import (
-    Gpt4oModel,
-    Claude35SonnetModel,
-    DeepSeekR1Model,
-    Gemini25ProModel,
+    GptOss20BModel,
     Flux1Model,
     FluxRealismModel,
     FluxAnimeModel,
@@ -37,8 +34,16 @@ class ThinkPortModelRegistry:
         self._models.pop(model_id, None)
 
     def get(self, model_id: str) -> Optional[IThinkPortModel]:
-        """ID ile model tanımını getirir."""
-        return self._models.get(model_id)
+        """ID veya alias ile model tanımını getirir."""
+        if not model_id:
+            return None
+        if model_id in self._models:
+            return self._models[model_id]
+        low = model_id.lower()
+        for m in self._models.values():
+            if m.matches_alias(low):
+                return m
+        return None
 
     def list_all(self) -> List[IThinkPortModel]:
         """Kayıtlı tüm IThinkPortModel örneklerini döner."""
@@ -91,10 +96,7 @@ class ThinkPortModelRegistry:
 
 
 DEFAULT_REGISTERED_MODELS: List[IThinkPortModel] = [
-    Gpt4oModel(),
-    Claude35SonnetModel(),
-    DeepSeekR1Model(),
-    Gemini25ProModel(),
+    GptOss20BModel(),
     Flux1Model(),
     FluxRealismModel(),
     FluxAnimeModel(),
