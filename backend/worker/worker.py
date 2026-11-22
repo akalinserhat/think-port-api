@@ -2,10 +2,21 @@ import asyncio
 import json
 import logging
 import os
-import redis.asyncio as redis
-from worker.dtos import BrowserJobDTO, RedisStreamEventDTO, WarmSessionConfigDTO
-from worker.dom_streamer_service import DomStreamerService
-from worker.session_pool import BrowserSessionPool
+from typing import Any, Optional
+
+try:
+    import redis.asyncio as redis  # type: ignore
+except ImportError:
+    redis = None  # type: ignore
+
+try:
+    from .dtos import BrowserJobDTO, RedisStreamEventDTO, WarmSessionConfigDTO
+    from .dom_streamer_service import DomStreamerService
+    from .session_pool import BrowserSessionPool
+except (ImportError, ValueError):
+    from worker.dtos import BrowserJobDTO, RedisStreamEventDTO, WarmSessionConfigDTO  # type: ignore
+    from worker.dom_streamer_service import DomStreamerService  # type: ignore
+    from worker.session_pool import BrowserSessionPool  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("browser_worker")
@@ -48,6 +59,11 @@ async def handle_single_job(
 
 async def worker_loop(provider: str = "chatgpt-web") -> None:
     """Redis iş kuyruğunu dinleyen ve gelen görevleri paralel dağıtan ana işçi döngüsü."""
+    if redis is None:
+        raise RuntimeError(
+            "Redis kütüphanesi kurulu değil. Lütfen 'pip install redis' çalıştırın."
+        )
+
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     streamer = DomStreamerService(redis_client)
     pool = BrowserSessionPool(max_sessions=5)

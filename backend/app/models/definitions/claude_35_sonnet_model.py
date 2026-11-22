@@ -42,6 +42,10 @@ class Claude35SonnetModel(BaseThinkPortModel):
         return "src/models/definitions/Claude35SonnetModel.ts"
 
     @property
+    def target_url(self) -> Optional[str]:
+        return "https://claude.ai/new"
+
+    @property
     def context_window(self) -> int:
         return 200000
 
@@ -51,7 +55,7 @@ class Claude35SonnetModel(BaseThinkPortModel):
 
     @property
     def web_model(self) -> Optional[str]:
-        return "openai-fast"
+        return "claude-3-5-sonnet"
 
     @property
     def fallback_local(self) -> Optional[str]:

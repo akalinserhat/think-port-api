@@ -12,18 +12,19 @@ import {
 
 export class DeepSeekR1Model extends BaseThinkPortModel {
   readonly id = 'deepseek-r1';
-  readonly name = 'DeepSeek R1 (Web Gateway)';
+  readonly name = 'DeepSeek R1 (DeepSeek API)';
   readonly vendor = 'DeepSeek';
-  readonly provider = 'deepseek-web';
+  readonly provider = 'deepseek-api';
   readonly protocolId = 'proto_openai';
   readonly category: ThinkPortModelCategory = 'chat';
-  readonly sourceType: ThinkPortModelSourceType = 'web';
-  readonly badge = 'Reasoning';
-  readonly description = 'DeepSeek R1 düşünce zinciri (Chain-of-Thought) web köprüsü.';
+  readonly sourceType: ThinkPortModelSourceType = 'external';
+  readonly badge = 'Direct REST API';
+  readonly description = 'DeepSeek R1 resmi REST API uç noktası (Düşünce zinciri muhakeme motoru).';
   readonly sourceFile = 'src/models/definitions/DeepSeekR1Model.ts';
+  override readonly hostingApp = 'DeepSeek Cloud REST API';
+  override readonly accessType = 'Doğrudan REST API';
   readonly contextWindow = 128000;
   readonly maxOutputTokens = 16384;
-  readonly webModel = 'openai-fast';
   readonly fallbackLocal = 'qwen2.5:7b';
 
   readonly aliases: readonly string[] = [

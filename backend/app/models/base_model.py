@@ -75,6 +75,9 @@ class IThinkPortModel(Protocol):
     def fallback_local(self) -> Optional[str]: ...
 
     @property
+    def target_url(self) -> Optional[str]: ...
+
+    @property
     def web_model(self) -> Optional[str]: ...
 
     @property
@@ -163,6 +166,10 @@ class BaseThinkPortModel(ABC):
         return None
 
     @property
+    def target_url(self) -> Optional[str]:
+        return None
+
+    @property
     def web_model(self) -> Optional[str]:
         return None
 
@@ -223,6 +230,8 @@ class BaseThinkPortModel(ABC):
                 "json_mode": caps.json_mode,
             },
         }
+        if self.target_url:
+            payload["target_url"] = self.target_url
         if self.web_model:
             payload["web_model"] = self.web_model
         if self.fallback_local:

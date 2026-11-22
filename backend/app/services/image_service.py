@@ -7,7 +7,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 from app.core.config import settings, IMAGE_STYLE_MODIFIERS
 from app.core.security import create_verified_ssl_context, create_unverified_ssl_context
 from app.core.exceptions import resource_not_found_error
@@ -39,7 +39,7 @@ class ImageService:
         image_cache_repo: ImageCacheRepository,
         model_service: ModelService,
         llm_provider: LlmProviderService,
-        record_usage_fn: Callable[[RecordUsageInputDTO], None],
+        record_usage_fn: Callable[[RecordUsageInputDTO], Any],
     ) -> None:
         self._cache_repo = image_cache_repo
         self._model_service = model_service
@@ -274,7 +274,7 @@ class ImageService:
                 {
                     "data": [
                         prompt,
-                        int(seed) % 2147483647,
+                        seed % 2147483647,
                         False,
                         max(256, min(1536, (width // 32) * 32)),
                         max(256, min(1536, (height // 32) * 32)),

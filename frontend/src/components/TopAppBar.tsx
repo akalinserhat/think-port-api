@@ -130,7 +130,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
       const aiNestedMatch = clean.match(/^\/settings\/ai\/([^/?#]+)/);
       const aiSubId = aiNestedMatch
         ? decodeURIComponent(aiNestedMatch[1])
-        : settingsModuleId === 'models' || settingsModuleId === 'protocols'
+        : settingsModuleId === 'protocols'
           ? settingsModuleId
           : null;
 
@@ -167,13 +167,17 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
       const moduleLabel =
         settingsModuleId === 'gateway'
           ? t('settings.gatewayModuleTitle', 'Gateway Sistem Ayarları')
-          : settingsModuleId === 'users'
+          : settingsModuleId === 'models'
+            ? t('settings.modelsModuleTitle', 'Yapay Zeka Modelleri')
+            : settingsModuleId === 'users'
             ? t('settings.usersModuleTitle', 'Sistem Kullanıcıları')
             : settingsModuleId === 'roles'
               ? t('settings.rolesModuleTitle', 'Rol ve Yetkiler')
               : settingsModuleId === 'smtp'
                 ? t('settings.smtpModuleTitle', 'E-Posta & SMTP Ayarları')
-                : settingsModuleId;
+                : settingsModuleId === 'browser-settings'
+                  ? 'Sanal Tarayıcı & Web Ayarları'
+                  : settingsModuleId;
 
       baseItems.push({
         label: tabTitles.settings,

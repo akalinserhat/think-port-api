@@ -12,18 +12,19 @@ import {
 
 export class Gpt4oModel extends BaseThinkPortModel {
   readonly id = 'gpt-4o';
-  readonly name = 'GPT-4o (Web Gateway)';
+  readonly name = 'GPT-4o (OpenAI API)';
   readonly vendor = 'OpenAI';
-  readonly provider = 'chatgpt-web';
+  readonly provider = 'openai-api';
   readonly protocolId = 'proto_openai';
   readonly category: ThinkPortModelCategory = 'chat';
-  readonly sourceType: ThinkPortModelSourceType = 'web';
-  readonly badge = 'Web AI';
-  readonly description = 'OpenAI GPT-4o web oturumu (yüksek hızlı Web AI köprüsü).';
+  readonly sourceType: ThinkPortModelSourceType = 'external';
+  readonly badge = 'Direct REST API';
+  readonly description = 'OpenAI GPT-4o resmi REST API uç noktası (Doğrudan API Key ile erişim, yüksek hızlı yanıt).';
   readonly sourceFile = 'src/models/definitions/Gpt4oModel.ts';
+  override readonly hostingApp = 'OpenAI Cloud REST API';
+  override readonly accessType = 'Doğrudan REST API';
   readonly contextWindow = 128000;
   readonly maxOutputTokens = 16384;
-  readonly webModel = 'openai-fast';
   readonly fallbackLocal = 'qwen2.5:7b';
 
   readonly aliases: readonly string[] = [

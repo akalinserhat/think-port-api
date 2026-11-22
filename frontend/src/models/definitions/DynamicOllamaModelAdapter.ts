@@ -28,6 +28,8 @@ export class DynamicOllamaModelAdapter extends BaseThinkPortModel {
   override readonly isImage: boolean;
   override readonly available: boolean;
   override readonly isSystemModel: boolean = true;
+  override readonly hostingApp: string;
+  override readonly accessType: string;
   override readonly contextWindow: number;
   override readonly maxOutputTokens: number;
   override readonly aliases: readonly string[];
@@ -47,6 +49,8 @@ export class DynamicOllamaModelAdapter extends BaseThinkPortModel {
     const isEmbed = lowerId.includes('embed') || lowerId.includes('bge-');
     this.category = isEmbed ? 'embedding' : this.isImage ? 'image' : 'chat';
     this.sourceType = this.isImage ? 'image' : this.isLocal ? 'local' : 'web';
+    this.hostingApp = this.isLocal ? 'Ollama (Port 11434)' : (dto.hosting_app || 'External Cloud API');
+    this.accessType = this.isLocal ? 'Yerel LLM (Ollama Motoru)' : (dto.access_type || 'Bulut Ağ Geçidi');
     this.badge = dto.badge || (this.isLocal ? 'Yerel Motor' : 'Web AI');
     this.description =
       dto.description ||

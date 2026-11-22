@@ -21,6 +21,8 @@ GATEWAY_BROWSER_TOOL_NAMES = {
     "thinkport_browser_click",
     "thinkport_browser_type",
     "thinkport_browser_scroll",
+    "thinkport_browser_inspect_apis",
+    "thinkport_browser_prompt_llm",
     "thinkport_browser_close",
 }
 
@@ -128,6 +130,59 @@ class BrowserToolService:
             {
                 "type": "function",
                 "function": {
+                    "name": "thinkport_browser_inspect_apis",
+                    "description": (
+                        "Açık olan veya belirtilen web sayfasını açarak sayfanın iletişim kurduğu API uç noktalarını "
+                        "(fetch/xhr/stream), sunucu IP adreslerini, dinamik JavaScript verilerini (WIZ_global_data, session tokenları) "
+                        "ve form kontrollerini tespit eder."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "İncelenecek sayfa adresi (isteğe bağlı, boş bırakılırsa açık sayfa incelenir).",
+                            },
+                            "use_proxy": {
+                                "type": "boolean",
+                                "description": "İsteğin anti-bot proxy havuzu üzerinden yapılıp yapılmayacağı.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "thinkport_browser_prompt_llm",
+                    "description": (
+                        "LLM web arayüzünü (örn: Gemini, Claude, ChatGPT vb.) açarak dinamik güvenlik kontrollerini "
+                        "(WIZ_global_data, cookies, anti-bot) inceler, istemi (prompt) hızlıca gönderir ve API akışını "
+                        "dinleyerek cevabı döner."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Gönderilecek istem (prompt metni).",
+                            },
+                            "url": {
+                                "type": "string",
+                                "description": "Hedef LLM web adresi (varsayılan: https://gemini.google.com/app).",
+                            },
+                            "use_proxy": {
+                                "type": "boolean",
+                                "description": "İsteğin anti-bot proxy havuzu üzerinden yapılıp yapılmayacağı.",
+                            },
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "thinkport_browser_close",
                     "description": "Açık olan sanal tarayıcı sekmesini ve oturumunu kapatır.",
                     "parameters": {
@@ -182,6 +237,8 @@ class BrowserToolService:
             "thinkport_browser_click": "click",
             "thinkport_browser_type": "type",
             "thinkport_browser_scroll": "scroll",
+            "thinkport_browser_inspect_apis": "inspect_apis",
+            "thinkport_browser_prompt_llm": "prompt_llm",
             "thinkport_browser_close": "close",
         }
         action = action_map.get(tool_name)
@@ -199,7 +256,7 @@ class BrowserToolService:
             except Exception:
                 args = {"url": raw_arguments.strip()}
 
-        payload = {
+        payload: Dict[str, Any] = {
             "action": action,
             "conversation_id": conversation_id or "default-conv",
             "app_id": app_id,
@@ -210,6 +267,10 @@ class BrowserToolService:
             "direction": args.get("direction", "down"),
             "use_proxy": bool(args.get("use_proxy", False)),
         }
+        if args.get("proxy_override"):
+            payload["proxy_override"] = args["proxy_override"]
+        if args.get("exclude_proxy_ids"):
+            payload["exclude_proxy_ids"] = args["exclude_proxy_ids"]
 
         api_url = f"{self.base_url}/api/browser/execute"
         try:
@@ -219,7 +280,7 @@ class BrowserToolService:
                 headers={"Content-Type": "application/json", "User-Agent": "ThinkPortAPI/1.0"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
+            with urllib.request.urlopen(req, timeout=75.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return json.dumps(data, ensure_ascii=False)
         except Exception as exc:

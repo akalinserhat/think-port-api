@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Cpu,
@@ -31,6 +31,9 @@ import {
   Wrench,
   FileJson,
   ShieldCheck,
+  Globe,
+  Server,
+  Info,
 } from 'lucide-react';
 import {
   BaseSystemPage,
@@ -74,16 +77,18 @@ export interface AiModelsViewProps {
 const DEFAULT_CREATE_INPUT: CreateThinkPortModelInput = {
   id: '',
   name: '',
-  vendor: 'OpenAI',
-  provider: 'chatgpt-web',
-  protocolId: 'proto_openai',
+  vendor: 'Local (Ollama)',
+  provider: 'local-engine',
+  protocolId: 'proto_ollama',
   category: 'chat',
-  sourceType: 'web',
-  badge: 'Web AI',
+  sourceType: 'local',
+  badge: 'Yerel Motor',
+  hostingApp: 'Ollama (Port 11434)',
+  accessType: 'Yerel LLM (Ollama Motoru)',
   description: '',
-  contextWindow: 128000,
-  maxOutputTokens: 16384,
-  fallbackLocal: 'qwen2.5:7b',
+  contextWindow: 32768,
+  maxOutputTokens: 8192,
+  fallbackLocal: '',
   aliases: [],
   capabilities: {
     streaming: true,
@@ -103,12 +108,13 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
   onModelsChanged,
 }) => {
   const { t } = useTranslation();
+  const location = useLocation();
   const navigate = useNavigate();
   const { filterItems } = useBaseSystemPage();
 
   const [registryVersion, setRegistryVersion] = useState<number>(0);
   const [protocols, setProtocols] = useState<ApiProtocolDTO[]>([]);
-  const [activeFilterTab, setActiveFilterTab] = useState<string>('all');
+  const [activeFilterTab, setActiveFilterTab] = useState<string>('local');
   const [deleteModelId, setDeleteModelId] = useState<string | null>(null);
 
   // Card editor state (null = list view, 'new' = create, model.id = inspect/edit)
@@ -177,10 +183,10 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
 
   const sourceTypeOptions = useMemo(
     () => [
-      { id: 'web', label: t('models.tabWeb', 'Web AI & Bulut') },
-      { id: 'local', label: t('models.tabLocal', 'Yerel Motor (Ollama)') },
-      { id: 'image', label: t('models.tabImage', 'Görsel Üretim') },
-      { id: 'external', label: 'External REST API' },
+      { id: 'local', label: t('models.tabCategory1Local', "1. Yerel LLM'ler (Ollama)") },
+      { id: 'external', label: t('models.tabCategory2Api', "2. Doğrudan API LLM'leri (REST API)") },
+      { id: 'web', label: t('models.tabCategory3Browser', "3. Sanal Tarayıcı LLM'leri (@akalin/browser_module)") },
+      { id: 'image', label: t('models.tabImage', 'Görsel Üretim (Text-to-Image)') },
     ],
     [t]
   );
@@ -205,6 +211,8 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
         category: model.category,
         sourceType: model.sourceType,
         badge: model.badge,
+        hostingApp: model.hostingApp || '',
+        accessType: model.accessType || '',
         description: model.description,
         contextWindow: model.contextWindow,
         maxOutputTokens: model.maxOutputTokens,
@@ -316,19 +324,45 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
     );
   }, [generatedClassCode, onShowToast, t]);
 
+  const localModels = useMemo(
+    () => allModels.filter((m) => m.isLocal || m.sourceType === 'local'),
+    [allModels]
+  );
+
+  const apiModels = useMemo(
+    () => allModels.filter((m) => !m.isLocal && m.sourceType === 'external'),
+    [allModels]
+  );
+
+  const browserModels = useMemo(
+    () =>
+      allModels.filter(
+        (m) =>
+          !m.isLocal &&
+          m.sourceType === 'web' &&
+          !m.isImage &&
+          m.category !== 'embedding'
+      ),
+    [allModels]
+  );
+
+  const otherModels = useMemo(
+    () => allModels.filter((m) => m.isImage || m.category === 'embedding'),
+    [allModels]
+  );
+
   const renderModelCards = useCallback(
-    (sourceFilter: 'all' | ThinkPortModelSourceType | 'embedding') => {
+    (sourceFilter: 'local' | 'api' | 'browser' | 'all' | 'other') => {
       const baseList =
-        sourceFilter === 'all'
-          ? allModels
-          : sourceFilter === 'embedding'
-            ? allModels.filter((m) => m.category === 'embedding')
-            : allModels.filter((m) =>
-                sourceFilter === 'web'
-                  ? (m.sourceType === 'web' || m.sourceType === 'external') &&
-                    m.category !== 'embedding'
-                  : m.sourceType === sourceFilter && m.category !== 'embedding'
-              );
+        sourceFilter === 'local'
+          ? localModels
+          : sourceFilter === 'api'
+            ? apiModels
+            : sourceFilter === 'browser'
+              ? browserModels
+              : sourceFilter === 'other'
+                ? otherModels
+                : allModels;
 
       const filtered = filterItems(baseList, (m) => [
         m.id,
@@ -338,144 +372,478 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
         m.badge,
         m.description,
         m.sourceFile,
+        m.hostingApp || '',
+        m.accessType || '',
         ...m.aliases,
       ]);
 
       return (
-        <div className="ai-saglayicilar-grid py-12">
-          {filtered.map((model) => {
-            const cardIcon = model.isImage ? (
-              <ImageIcon size={22} />
-            ) : model.isLocal ? (
-              <Cpu size={22} />
-            ) : (
-              <Sparkles size={22} />
-            );
+        <div className="flex-col gap-16 py-12">
+          {sourceFilter === 'local' && (
+            <div className="card-m3-surface p-16 flex items-center gap-12 border border-outline-variant rounded-12 bg-surface-container">
+              <Cpu className="text-primary flex-shrink-0" size={24} />
+              <div className="flex flex-col">
+                <span className="font-semibold text-sm text-on-surface">
+                  {t('models.bannerLocalTitle', "1. Kategori: Yerel LLM'ler (Ollama Yerel Motoru)")}
+                </span>
+                <span className="text-xs text-on-surface-variant">
+                  {t(
+                    'models.bannerLocalDesc',
+                    'Bu modeller sisteminizde kurulu olan Ollama (Port 11434) uygulaması tarafından doğrudan donanımınızda (Apple Silicon / Metal GPU) çevrimdışı ve gizli çalıştırılır.'
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
 
-            return (
-              <BaseSystemCard
-                key={model.id}
-                title={model.name}
-                subtitle={model.description}
-                icon={cardIcon}
-                badge={
-                  <div className="flex-row items-center gap-6 flex-wrap">
-                    <span className="chip-primary">{model.badge}</span>
-                    {model.isSystemModel ? (
-                      <span className="chip-success">
-                        {t('models.systemBadge', 'Çekirdek Sınıf')}
-                      </span>
-                    ) : (
-                      <span className="chip-warning">
-                        {t('models.customBadge', 'Özel Tanım')}
-                      </span>
-                    )}
-                  </div>
-                }
-                onClick={() => handleOpenInspect(model, 'genel')}
-                actions={[
-                  {
-                    label: t('models.inspectAction', 'İncele & Düzenle'),
-                    icon: <Edit3 size={16} />,
-                    onClick: () => handleOpenInspect(model, 'genel'),
-                  },
-                  {
-                    label: t('models.viewCodeAction', 'Sınıf Kodunu Gör (.ts)'),
-                    icon: <FileCode2 size={16} />,
-                    onClick: () => handleOpenInspect(model, 'code'),
-                  },
-                  ...(model.category !== 'embedding'
-                    ? [
-                        {
-                          label: t('models.testInStudioAction', 'Sohbet Stüdyosunda Dene'),
-                          icon: <MessageSquare size={16} />,
-                          onClick: () => {
-                            onSelectModelForChat?.(model.id);
-                            navigate('/chat');
+          {sourceFilter === 'api' && (
+            <div className="card-m3-surface p-16 flex items-center gap-12 border border-outline-variant rounded-12 bg-surface-container">
+              <Code2 className="text-primary flex-shrink-0" size={24} />
+              <div className="flex flex-col">
+                <span className="font-semibold text-sm text-on-surface">
+                  {t('models.bannerApiTitle', "2. Kategori: Doğrudan API LLM'leri (REST API)")}
+                </span>
+                <span className="text-xs text-on-surface-variant">
+                  {t(
+                    'models.bannerApiDesc',
+                    'Bu modeller OpenAI, Anthropic, Google Gemini ve DeepSeek gibi sağlayıcıların resmi HTTPS REST API uç noktalarına API anahtarı (Bearer Token) ile doğrudan bağlanır.'
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {sourceFilter === 'browser' && (
+            <div className="card-m3-surface p-16 flex items-center gap-12 border border-outline-variant rounded-12 bg-surface-container">
+              <Globe className="text-primary flex-shrink-0" size={24} />
+              <div className="flex flex-col">
+                <span className="font-semibold text-sm text-on-surface">
+                  {t('models.bannerBrowserTitle', "3. Kategori: Sanal Tarayıcı LLM'leri (@akalin/browser_module)")}
+                </span>
+                <span className="text-xs text-on-surface-variant">
+                  {t(
+                    'models.bannerBrowserDesc',
+                    'Bu modeller @akalin/browser_module (Docker Playwright Chromium) sanal tarayıcısı ve @akalin/proxy_module rotasyonlu proxy ağı üzerinden web oturumu ile çalışır.'
+                  )}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div className="ai-saglayicilar-grid">
+            {filtered.map((model) => {
+              const isLocalModel = model.isLocal || model.sourceType === 'local';
+              const isApiModel = !model.isLocal && model.sourceType === 'external';
+              const isBrowserModel =
+                !model.isLocal &&
+                model.sourceType === 'web' &&
+                !model.isImage &&
+                model.category !== 'embedding';
+
+              const cardIcon = model.isImage ? (
+                <ImageIcon size={22} />
+              ) : isLocalModel ? (
+                <Cpu size={22} />
+              ) : isBrowserModel ? (
+                <Globe size={22} />
+              ) : (
+                <Sparkles size={22} />
+              );
+
+              const categoryBadge = isLocalModel ? (
+                <span className="chip-primary">🦙 Ollama</span>
+              ) : isApiModel ? (
+                <span className="chip-primary">⚡ REST API</span>
+              ) : isBrowserModel ? (
+                <span className="chip-primary">🌐 Sanal Tarayıcı</span>
+              ) : (
+                <span className="chip-primary">{model.badge}</span>
+              );
+
+              return (
+                <BaseSystemCard
+                  key={model.id}
+                  title={model.name}
+                  subtitle={model.description}
+                  icon={cardIcon}
+                  badge={
+                    <div className="flex-row items-center gap-6 flex-wrap">
+                      {categoryBadge}
+                      <span className="chip-info">{model.badge}</span>
+                      {model.isSystemModel ? (
+                        <span className="chip-success">
+                          {t('models.systemBadge', 'Çekirdek Sınıf')}
+                        </span>
+                      ) : (
+                        <span className="chip-warning">
+                          {t('models.customBadge', 'Özel Tanım')}
+                        </span>
+                      )}
+                    </div>
+                  }
+                  onClick={() => handleOpenInspect(model, 'genel')}
+                  actions={[
+                    {
+                      label: t('models.inspectAction', 'İncele & Düzenle'),
+                      icon: <Edit3 size={16} />,
+                      onClick: () => handleOpenInspect(model, 'genel'),
+                    },
+                    {
+                      label: t('models.viewCodeAction', 'Sınıf Kodunu Gör (.ts)'),
+                      icon: <FileCode2 size={16} />,
+                      onClick: () => handleOpenInspect(model, 'code'),
+                    },
+                    ...(model.category !== 'embedding'
+                      ? [
+                          {
+                            label: t('models.testInStudioAction', 'Sohbet Stüdyosunda Dene'),
+                            icon: <MessageSquare size={16} />,
+                            onClick: () => {
+                              onSelectModelForChat?.(model.id);
+                              navigate('/chat');
+                            },
                           },
-                        },
-                      ]
-                    : []),
-                  ...(!model.isSystemModel
-                    ? [
-                        {
-                          label: t('models.deleteAction', 'Sil / Varsayılana Dön'),
-                          icon: <Trash2 size={16} />,
-                          danger: true,
-                          onClick: () => setDeleteModelId(model.id),
-                        },
-                      ]
-                    : []),
-                ]}
-                details={[
-                  {
-                    label: (
-                      <span className="flex items-center gap-6">
-                        <Layers size={14} />
-                        <span>{t('models.vendorLabel', 'Üretici / Sağlayıcı')}</span>
-                      </span>
-                    ),
-                    value: (
-                      <span className="font-semibold text-primary">
-                        {model.vendor} · {model.provider}
-                      </span>
-                    ),
-                  },
-                  {
-                    label: (
-                      <span className="flex items-center gap-6">
-                        <Code2 size={14} />
-                        <span>{t('models.protocolLabel', 'API Protokolü')}</span>
-                      </span>
-                    ),
-                    value: (
-                      <span className="chip-primary text-xs">
-                        {protocolNameMap[model.protocolId] || model.protocolId}
-                      </span>
-                    ),
-                  },
-                  {
-                    label: (
-                      <span className="flex items-center gap-6">
-                        <Zap size={14} />
-                        <span>{t('models.contextWindowLabel', 'Bağlam Penceresi')}</span>
-                      </span>
-                    ),
-                    value: (
-                      <span className="font-semibold text-primary">
-                        {Math.round(model.contextWindow / 1000)}K ·{' '}
-                        {t('models.aliasesCountLabel', '{{count}} Takma Ad', {
-                          count: model.aliases.length,
-                        })}
-                      </span>
-                    ),
-                  },
-                  {
-                    label: (
-                      <span className="flex items-center gap-6">
-                        <FileCode2 size={14} />
-                        <span>{t('models.sourceFileLabel', 'Kod Dosyası')}</span>
-                      </span>
-                    ),
-                    value: (
-                      <span className="font-mono text-xs text-secondary">
-                        {model.sourceFile.split('/').pop()}
-                      </span>
-                    ),
-                  },
-                ]}
-              />
-            );
-          })}
+                        ]
+                      : []),
+                    ...(!model.isSystemModel
+                      ? [
+                          {
+                            label: t('models.deleteAction', 'Sil / Varsayılana Dön'),
+                            icon: <Trash2 size={16} />,
+                            danger: true,
+                            onClick: () => setDeleteModelId(model.id),
+                          },
+                        ]
+                      : []),
+                  ]}
+                  details={
+                    isLocalModel
+                      ? [
+                          {
+                            label: (
+                              <span className="flex items-center gap-6">
+                                <Server size={14} />
+                                <span>{t('models.hostingAppLabel', 'Sağlayıcı Uygulama')}</span>
+                              </span>
+                            ),
+                            value: (
+                              <span className="font-semibold text-primary">
+                                🦙 {model.hostingApp || 'Ollama (Yerel Motor)'}
+                              </span>
+                            ),
+                          },
+                          {
+                            label: (
+                              <span className="flex items-center gap-6">
+                                <Code2 size={14} />
+                                <span>{t('models.serverEndpointLabel', 'Sunucu & Port')}</span>
+                              </span>
+                            ),
+                            value: (
+                              <span className="chip-primary text-xs font-mono">
+                                http://localhost:11434
+                              </span>
+                            ),
+                          },
+                          {
+                            label: (
+                              <span className="flex items-center gap-6">
+                                <Cpu size={14} />
+                                <span>{t('models.hardwareModeLabel', 'Çalışma Modu')}</span>
+                              </span>
+                            ),
+                            value: (
+                              <span className="text-secondary text-xs">
+                                Yerel Donanım (Metal / GPU) · Çevrimdışı
+                              </span>
+                            ),
+                          },
+                          {
+                            label: (
+                              <span className="flex items-center gap-6">
+                                <Zap size={14} />
+                                <span>{t('models.contextWindowLabel', 'Bağlam Penceresi')}</span>
+                              </span>
+                            ),
+                            value: (
+                              <span className="font-semibold text-primary">
+                                {Math.round(model.contextWindow / 1000)}K ·{' '}
+                                {t('models.aliasesCountLabel', '{{count}} Takma Ad', {
+                                  count: model.aliases.length,
+                                })}
+                              </span>
+                            ),
+                          },
+                          {
+                            label: (
+                              <span className="flex items-center gap-6">
+                                <FileCode2 size={14} />
+                                <span>{t('models.sourceFileLabel', 'Kod Dosyası')}</span>
+                              </span>
+                            ),
+                            value: (
+                              <span className="font-mono text-xs text-secondary">
+                                {model.sourceFile.split('/').pop()}
+                              </span>
+                            ),
+                          },
+                        ]
+                      : isApiModel
+                        ? [
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <Layers size={14} />
+                                  <span>{t('models.accessTypeLabel', 'Erişim Yöntemi')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="font-semibold text-primary">
+                                  Doğrudan REST API
+                                </span>
+                              ),
+                            },
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <Server size={14} />
+                                  <span>{t('models.vendorLabel', 'Üretici Firma')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="font-semibold text-secondary">
+                                  {model.vendor} ({model.hostingApp || model.provider})
+                                </span>
+                              ),
+                            },
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <ShieldCheck size={14} />
+                                  <span>{t('models.authMethodLabel', 'Kimlik Doğrulama')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="chip-primary text-xs">
+                                  API Key / Bearer Token Gerekli
+                                </span>
+                              ),
+                            },
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <Code2 size={14} />
+                                  <span>{t('models.protocolLabel', 'API Protokolü')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="chip-primary text-xs">
+                                  {protocolNameMap[model.protocolId] || model.protocolId}
+                                </span>
+                              ),
+                            },
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <Zap size={14} />
+                                  <span>{t('models.contextWindowLabel', 'Bağlam Penceresi')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="font-semibold text-primary">
+                                  {Math.round(model.contextWindow / 1000)}K ·{' '}
+                                  {t('models.aliasesCountLabel', '{{count}} Takma Ad', {
+                                    count: model.aliases.length,
+                                  })}
+                                </span>
+                              ),
+                            },
+                            {
+                              label: (
+                                <span className="flex items-center gap-6">
+                                  <FileCode2 size={14} />
+                                  <span>{t('models.sourceFileLabel', 'Kod Dosyası')}</span>
+                                </span>
+                              ),
+                              value: (
+                                <span className="font-mono text-xs text-secondary">
+                                  {model.sourceFile.split('/').pop()}
+                                </span>
+                              ),
+                            },
+                          ]
+                        : isBrowserModel
+                          ? [
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Globe size={14} />
+                                    <span>{t('models.accessTypeLabel', 'Erişim Yöntemi')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-semibold text-primary">
+                                    Sanal Tarayıcı (Web AI Gateway)
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Globe size={14} />
+                                    <span>{t('models.targetUrlLabel', 'Hedef Web URL')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="chip-primary text-xs font-mono">
+                                    {model.targetUrl || (model.provider === 'gemini-web' ? 'https://gemini.google.com/app' : 'https://chatgpt.com/')}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Server size={14} />
+                                    <span>{t('models.browserEngineLabel', 'Tarayıcı Motoru')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="chip-primary text-xs">
+                                    @akalin/browser_module (Playwright Docker)
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Zap size={14} />
+                                    <span>{t('models.proxyTunnelLabel', 'Proxy Tüneli')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="chip-primary text-xs">
+                                    @akalin/proxy_module (Rotasyonlu Proxy)
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Code2 size={14} />
+                                    <span>{t('models.protocolLabel', 'API Protokolü')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="chip-primary text-xs">
+                                    {protocolNameMap[model.protocolId] || model.protocolId}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Zap size={14} />
+                                    <span>{t('models.contextWindowLabel', 'Bağlam Penceresi')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-semibold text-primary">
+                                    {Math.round(model.contextWindow / 1000)}K ·{' '}
+                                    {t('models.aliasesCountLabel', '{{count}} Takma Ad', {
+                                      count: model.aliases.length,
+                                    })}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <FileCode2 size={14} />
+                                    <span>{t('models.sourceFileLabel', 'Kod Dosyası')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-mono text-xs text-secondary">
+                                    {model.sourceFile.split('/').pop()}
+                                  </span>
+                                ),
+                              },
+                            ]
+                          : [
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Layers size={14} />
+                                    <span>{t('models.vendorLabel', 'Üretici / Sağlayıcı')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-semibold text-primary">
+                                    {model.vendor} · {model.provider}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Code2 size={14} />
+                                    <span>{t('models.protocolLabel', 'API Protokolü')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="chip-primary text-xs">
+                                    {protocolNameMap[model.protocolId] || model.protocolId}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <Zap size={14} />
+                                    <span>{t('models.contextWindowLabel', 'Bağlam Penceresi')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-semibold text-primary">
+                                    {Math.round(model.contextWindow / 1000)}K ·{' '}
+                                    {t('models.aliasesCountLabel', '{{count}} Takma Ad', {
+                                      count: model.aliases.length,
+                                    })}
+                                  </span>
+                                ),
+                              },
+                              {
+                                label: (
+                                  <span className="flex items-center gap-6">
+                                    <FileCode2 size={14} />
+                                    <span>{t('models.sourceFileLabel', 'Kod Dosyası')}</span>
+                                  </span>
+                                ),
+                                value: (
+                                  <span className="font-mono text-xs text-secondary">
+                                    {model.sourceFile.split('/').pop()}
+                                  </span>
+                                ),
+                              },
+                            ]
+                  }
+                />
+              );
+            })}
+          </div>
         </div>
       );
     },
     [
       allModels,
+      apiModels,
+      browserModels,
       filterItems,
       handleOpenInspect,
+      localModels,
       navigate,
       onSelectModelForChat,
+      otherModels,
       protocolNameMap,
       t,
     ]
@@ -484,37 +852,45 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
   const listTabs: BaseTabItem[] = useMemo(
     () => [
       {
+        id: 'local',
+        label: `${t('models.tabCategory1Local', "1. Yerel LLM'ler (Ollama)")} (${localModels.length})`,
+        icon: <Cpu size={16} />,
+        content: renderModelCards('local'),
+      },
+      {
+        id: 'api',
+        label: `${t('models.tabCategory2Api', "2. Doğrudan API LLM'leri")} (${apiModels.length})`,
+        icon: <Code2 size={16} />,
+        content: renderModelCards('api'),
+      },
+      {
+        id: 'browser',
+        label: `${t('models.tabCategory3Browser', "3. Sanal Tarayıcı LLM'leri")} (${browserModels.length})`,
+        icon: <Globe size={16} />,
+        content: renderModelCards('browser'),
+      },
+      {
         id: 'all',
         label: `${t('models.tabAll', 'Tüm Modeller')} (${allModels.length})`,
         icon: <Layers size={16} />,
         content: renderModelCards('all'),
       },
       {
-        id: 'web',
-        label: t('models.tabWeb', 'Web AI & Bulut'),
-        icon: <Sparkles size={16} />,
-        content: renderModelCards('web'),
-      },
-      {
-        id: 'local',
-        label: t('models.tabLocal', 'Yerel Motor (Ollama)'),
-        icon: <Cpu size={16} />,
-        content: renderModelCards('local'),
-      },
-      {
-        id: 'image',
-        label: t('models.tabImage', 'Görsel Üretim'),
-        icon: <ImageIcon size={16} />,
-        content: renderModelCards('image'),
-      },
-      {
-        id: 'embedding',
-        label: t('models.tabEmbedding', 'Embedding & Vektör (RAG)'),
+        id: 'other',
+        label: `${t('models.tabOther', 'Görsel & Vektör')} (${otherModels.length})`,
         icon: <Brain size={16} />,
-        content: renderModelCards('embedding'),
+        content: renderModelCards('other'),
       },
     ],
-    [allModels.length, renderModelCards, t]
+    [
+      allModels.length,
+      apiModels.length,
+      browserModels.length,
+      localModels.length,
+      otherModels.length,
+      renderModelCards,
+      t,
+    ]
   );
 
   const formTabs: BaseTabItem[] = useMemo(
@@ -686,6 +1062,34 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
                   onChange={(e) =>
                     handleFieldChange('maxOutputTokens', Number(e.target.value) || 8192)
                   }
+                />
+              </div>
+            </div>
+
+            <div className="grid-2-col gap-16">
+              <div className="form-group">
+                <label className="form-label">
+                  {t('models.hostingAppLabel', 'Sağlayıcı Uygulama')}
+                </label>
+                <BasitInput
+                  type="text"
+                  textTransform="none"
+                  value={formState.hostingApp || ''}
+                  onChange={(e) => handleFieldChange('hostingApp', e.target.value)}
+                  placeholder="Örn: Ollama (Port 11434) veya OpenAI Cloud API"
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">
+                  {t('models.accessTypeLabel', 'Erişim Yöntemi')}
+                </label>
+                <BasitInput
+                  type="text"
+                  textTransform="none"
+                  value={formState.accessType || ''}
+                  onChange={(e) => handleFieldChange('accessType', e.target.value)}
+                  placeholder="Örn: Yerel LLM, Doğrudan REST API veya Sanal Tarayıcı"
                 />
               </div>
             </div>
@@ -965,6 +1369,10 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
     );
   }
 
+  const isDirectSettingsRoute = location.pathname.startsWith('/settings/models');
+  const effectiveBaseRoute = isDirectSettingsRoute ? '/settings/models' : '/settings/ai/models';
+  const effectiveBackRoute = isDirectSettingsRoute ? '/settings' : '/settings/ai';
+
   return (
     <BaseSystemPage
       title={t('models.title', 'Yapay Zeka Modelleri (IThinkPortModel)')}
@@ -973,8 +1381,10 @@ export const AiModelsView: React.FC<AiModelsViewProps> = ({
         'ThinkPort API Gateway içinde kullanılan ve her biri kendi sınıf dosyasında IThinkPortModel arayüzünü uygulayan genişletilebilir model kataloğu.'
       )}
       icon={<Cpu size={26} />}
-      baseRoute="/settings/ai/models"
-      showBackButton={false}
+      baseRoute={effectiveBaseRoute}
+      backRoute={effectiveBackRoute}
+      showBackButton={isDirectSettingsRoute}
+      onBack={isDirectSettingsRoute ? () => navigate('/settings') : undefined}
       headerSync={false}
       tabs={listTabs}
       activeTabId={activeFilterTab}

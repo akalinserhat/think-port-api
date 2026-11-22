@@ -42,6 +42,10 @@ class Gemini25ProModel(BaseThinkPortModel):
         return "src/models/definitions/Gemini25ProModel.ts"
 
     @property
+    def target_url(self) -> Optional[str]:
+        return "https://gemini.google.com/app"
+
+    @property
     def context_window(self) -> int:
         return 1000000
 
@@ -51,7 +55,7 @@ class Gemini25ProModel(BaseThinkPortModel):
 
     @property
     def web_model(self) -> Optional[str]:
-        return "openai-fast"
+        return "gemini-2.5-pro"
 
     @property
     def fallback_local(self) -> Optional[str]:

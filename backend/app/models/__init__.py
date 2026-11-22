@@ -7,6 +7,10 @@ from app.models.base_model import (
     ModelCapabilities,
     ModelCategoryLiteral,
 )
+from app.models.web_browser_model import (
+    IWebBrowserModel,
+    BaseWebBrowserModel,
+)
 from app.models.registry import ThinkPortModelRegistry, model_registry, DEFAULT_REGISTERED_MODELS
 from app.models.definitions import (
     GptOss20BModel,
@@ -14,6 +18,8 @@ from app.models.definitions import (
     Claude35SonnetModel,
     DeepSeekR1Model,
     Gemini25ProModel,
+    GeminiWebModel,
+    ChatGptWebModel,
     Flux1Model,
     FluxRealismModel,
     FluxAnimeModel,
@@ -25,6 +31,8 @@ from app.models.definitions import (
 __all__ = [
     "IThinkPortModel",
     "BaseThinkPortModel",
+    "IWebBrowserModel",
+    "BaseWebBrowserModel",
     "ModelCapabilities",
     "ModelCategoryLiteral",
     "ThinkPortModelRegistry",
@@ -35,6 +43,8 @@ __all__ = [
     "Claude35SonnetModel",
     "DeepSeekR1Model",
     "Gemini25ProModel",
+    "GeminiWebModel",
+    "ChatGptWebModel",
     "Flux1Model",
     "FluxRealismModel",
     "FluxAnimeModel",

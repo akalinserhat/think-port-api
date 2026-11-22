@@ -8,6 +8,8 @@
 
 import { IThinkPortModel } from '../IThinkPortModel';
 import { GptOss20BModel, gptOss20BModel } from './GptOss20BModel';
+import { GeminiWebModel, geminiWebModel } from './GeminiWebModel';
+import { ChatGptWebModel, chatGptWebModel } from './ChatGptWebModel';
 import { Gpt4oModel, gpt4oModel } from './Gpt4oModel';
 import { Claude35SonnetModel, claude35SonnetModel } from './Claude35SonnetModel';
 import { DeepSeekR1Model, deepSeekR1Model } from './DeepSeekR1Model';
@@ -26,6 +28,10 @@ import { CustomModelAdapter } from './CustomModelAdapter';
 export {
   GptOss20BModel,
   gptOss20BModel,
+  GeminiWebModel,
+  geminiWebModel,
+  ChatGptWebModel,
+  chatGptWebModel,
   Gpt4oModel,
   gpt4oModel,
   Claude35SonnetModel,
@@ -56,10 +62,25 @@ export {
 
 /**
  * Sistemde yerleşik olarak tanımlı tüm IThinkPortModel örnekleri.
- * Yalnızca gerçekte var olan ve aktif modeller kayıtlıdır.
+ * 3 Ana Kategori (Yerel Ollama, Doğrudan REST API, Sanal Tarayıcı) ve Görsel/Embedding modelleri.
  */
 export const BUILTIN_THINKPORT_MODELS: readonly IThinkPortModel[] = [
+  // 1. Kategori: Yerel LLM'ler (Ollama)
+  qwen25LocalModel,
+  gemma4LocalModel,
+
+  // 2. Kategori: Doğrudan REST API LLM'leri
+  gpt4oModel,
+  claude35SonnetModel,
+  gemini25ProModel,
+  deepSeekR1Model,
+
+  // 3. Kategori: Sanal Tarayıcı LLM'leri (Docker Browser + Proxy)
   gptOss20BModel,
+  geminiWebModel,
+  chatGptWebModel,
+
+  // Görsel ve Vektör Modelleri
   flux1Model,
   fluxRealismModel,
   fluxAnimeModel,

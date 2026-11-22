@@ -28,6 +28,8 @@ export class CustomModelAdapter extends BaseThinkPortModel {
   override readonly isImage: boolean;
   override readonly available: boolean;
   override readonly isSystemModel: boolean = false;
+  override readonly hostingApp?: string;
+  override readonly accessType?: string;
   override readonly contextWindow: number;
   override readonly maxOutputTokens: number;
   override readonly fallbackLocal?: string;
@@ -45,6 +47,8 @@ export class CustomModelAdapter extends BaseThinkPortModel {
     this.sourceType = input.sourceType || 'external';
     this.badge = input.badge.trim() || 'Özel Model';
     this.description = input.description.trim();
+    this.hostingApp = input.hostingApp?.trim() || undefined;
+    this.accessType = input.accessType?.trim() || undefined;
     this.sourceFile =
       sourceFile ||
       `src/models/definitions/${this.id.replace(/[^a-zA-Z0-9]/g, '_')}Model.ts`;

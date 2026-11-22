@@ -116,7 +116,7 @@ class ModelService:
                 "is_image": bool(item.get("is_image", False)),
                 "available": is_avail,
             }
-            models.append(ModelDefinitionDTO(**data))
+            models.append(ModelDefinitionDTO.model_validate(data))
         return models
 
     def get_image_models(self) -> List[ModelDefinitionDTO]:
@@ -136,7 +136,7 @@ class ModelService:
                 "is_image": True,
                 "available": is_avail,
             }
-            models.append(ModelDefinitionDTO(**data))
+            models.append(ModelDefinitionDTO.model_validate(data))
         return models
 
     def get_inactive_fallback_local_models(
@@ -180,7 +180,7 @@ class ModelService:
                 "is_image": False,
                 "available": True,
             }
-            models.append(ModelDefinitionDTO(**data))
+            models.append(ModelDefinitionDTO.model_validate(data))
         return models
 
     def get_full_model_library(
@@ -278,18 +278,9 @@ class ModelService:
         if stripped in MODEL_ALIAS_MAP:
             return MODEL_ALIAS_MAP[stripped]
 
-        # 3. Aile / Önek (Wildcard) tabanlı eşleştirme
+        # 3. Yalnızca aynı model ailesine ait görsel üretim önekleri eşleştirilir;
+        # farklı bir sağlayıcı/modele sessiz yönlendirme yapılmaz.
         for candidate in (lower, stripped):
-            if candidate.startswith(("gpt-oss", "openai-fast")):
-                return "gpt-oss:20b"
-            if candidate.startswith(("claude-3-5-sonnet", "claude-3.5-sonnet", "claude-3-7-sonnet", "claude-3.7-sonnet", "claude-3", "claude-sonnet", "claude-opus", "claude-haiku", "claude")):
-                return "gpt-oss:20b"
-            if candidate.startswith(("gemini-", "gemini")):
-                return "gpt-oss:20b"
-            if candidate.startswith(("deepseek-", "deepseek")):
-                return "gpt-oss:20b"
-            if candidate.startswith(("gpt-4", "gpt-3.5", "gpt-", "chatgpt-", "o1", "o3", "o4")):
-                return "gpt-oss:20b"
             if candidate.startswith("flux-realism"):
                 return "flux-realism"
             if candidate.startswith("flux-anime"):
@@ -301,17 +292,8 @@ class ModelService:
             if candidate.startswith(("sdxl", "turbo")):
                 return "turbo"
 
-        # 4. Yerel model formatındaysa ancak kurulu değilse mevcut en iyi yerel modeli veya gpt-oss:20b'yi seç
-        local_models = self.discover_local_ollama_models()
-        local_ids = [m.id for m in local_models]
-        if local_ids:
-            for lid in local_ids:
-                if lid.split(":")[0].lower() == stripped.split(":")[0]:
-                    return lid
-            if ":" in raw:
-                return local_ids[0]
-
-        return "gpt-oss:20b"
+        # 4. Eşleşmeyen model adını başka bir modele sessizce yönlendirme; istenen adı koru
+        return raw
 
     def resolve_provider_for_model(self, model_id: str) -> str:
         """Model ID'sine (veya takma adına) karşılık gelen sağlayıcı (provider) adını çözer."""

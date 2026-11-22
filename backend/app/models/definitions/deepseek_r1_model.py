@@ -42,6 +42,10 @@ class DeepSeekR1Model(BaseThinkPortModel):
         return "src/models/definitions/DeepSeekR1Model.ts"
 
     @property
+    def target_url(self) -> Optional[str]:
+        return "https://chat.deepseek.com/"
+
+    @property
     def context_window(self) -> int:
         return 128000
 
@@ -51,7 +55,7 @@ class DeepSeekR1Model(BaseThinkPortModel):
 
     @property
     def web_model(self) -> Optional[str]:
-        return "openai-fast"
+        return "deepseek-r1"
 
     @property
     def fallback_local(self) -> Optional[str]:

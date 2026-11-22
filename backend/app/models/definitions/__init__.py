@@ -7,6 +7,8 @@ from app.models.definitions.gpt_4o_model import Gpt4oModel
 from app.models.definitions.claude_35_sonnet_model import Claude35SonnetModel
 from app.models.definitions.deepseek_r1_model import DeepSeekR1Model
 from app.models.definitions.gemini_25_pro_model import Gemini25ProModel
+from app.models.definitions.gemini_web_model import GeminiWebModel
+from app.models.definitions.chatgpt_web_model import ChatGptWebModel
 from app.models.definitions.flux_1_model import Flux1Model
 from app.models.definitions.flux_realism_model import FluxRealismModel
 from app.models.definitions.flux_anime_model import FluxAnimeModel
@@ -21,6 +23,8 @@ __all__ = [
     "Claude35SonnetModel",
     "DeepSeekR1Model",
     "Gemini25ProModel",
+    "GeminiWebModel",
+    "ChatGptWebModel",
     "Flux1Model",
     "FluxRealismModel",
     "FluxAnimeModel",

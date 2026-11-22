@@ -23,6 +23,8 @@ export class Qwen25LocalModel extends BaseThinkPortModel {
     'Sisteminizde kurulu gerçek yerel yapay zeka modeli (QWEN2, 4.7 GB). Yüksek hızlı Türkçe ve kodlama desteği.';
   readonly sourceFile = 'src/models/definitions/Qwen25LocalModel.ts';
   override readonly isLocal = true;
+  override readonly hostingApp = 'Ollama (Port 11434)';
+  override readonly accessType = 'Yerel LLM (Ollama Motoru)';
   override readonly contextWindow = 32768;
   override readonly maxOutputTokens = 8192;
 

@@ -15,6 +15,7 @@ import {
   Users,
   ShieldCheck,
   Bot,
+  Cpu,
 } from 'lucide-react';
 import {
   ActionMenu,
@@ -34,6 +35,7 @@ import { protocolService } from '../services';
 import { SystemUsersView } from './SystemUsersView';
 import { RolesPermissionsView } from './RolesPermissionsView';
 import { AiSettingsGroupView } from './AiSettingsGroupView';
+import { AiModelsView } from './AiModelsView';
 import { initializeGatewayModules } from '../modules';
 
 initializeGatewayModules();
@@ -355,9 +357,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const selectedModuleId = useMemo(() => {
     const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '');
+    if (clean.startsWith('/settings/models')) {
+      return 'models';
+    }
     if (
       clean.startsWith('/settings/ai') ||
-      clean.startsWith('/settings/models') ||
       clean.startsWith('/settings/agents') ||
       clean.startsWith('/settings/protocols') ||
       clean.startsWith('/settings/embedding')
@@ -386,6 +390,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <GatewaySettingsModule
             settings={settings}
             onSaveSettings={onSaveSettings}
+          />
+        ),
+      },
+      {
+        id: 'models',
+        name: t('settings.modelsModuleTitle', 'Yapay Zeka Modelleri'),
+        desc: t(
+          'settings.modelsModuleDesc',
+          'Yerel LLM (Ollama), Doğrudan REST API ve Sanal Tarayıcı (Web AI) yapay zeka modellerini yapılandırın'
+        ),
+        icon: <Cpu size={22} />,
+        badge: `${modelsCount} Model · 3 Kategori`,
+        keywords:
+          'yapay zeka ai modeller modelleri llm yerel local ollama doğrudan rest api sanal tarayıcı browser web gpt-oss gpt-4o claude gemini deepseek qwen gemma',
+        hasOwnLayout: true,
+        component: (
+          <AiModelsView
+            runtimeModels={models}
+            onSelectModelForChat={onSelectModel}
+            onShowToast={onShowToast}
+            onModelsChanged={(count) => {
+              setModelsCount(count);
+            }}
           />
         ),
       },

@@ -29,6 +29,9 @@ export abstract class BaseThinkPortModel implements IThinkPortModel {
   readonly isImage: boolean = false;
   readonly available: boolean = true;
   readonly isSystemModel: boolean = true;
+  readonly hostingApp?: string;
+  readonly accessType?: string;
+  readonly targetUrl?: string;
   readonly contextWindow: number = 128000;
   readonly maxOutputTokens: number = 16384;
   readonly fallbackLocal?: string;
@@ -68,6 +71,12 @@ export abstract class BaseThinkPortModel implements IThinkPortModel {
       image_model: this.imageModel,
       web_model: this.webModel,
       fallback_local: this.fallbackLocal,
+      type: this.category,
+      available: this.available,
+      hosting_app: this.hostingApp,
+      access_type: this.accessType,
+      source_type: this.sourceType,
+      target_url: this.targetUrl,
     };
   }
 }

@@ -12,18 +12,19 @@ import {
 
 export class Gemini25ProModel extends BaseThinkPortModel {
   readonly id = 'gemini-2.5-pro';
-  readonly name = 'Gemini 2.5 Pro (Web Gateway)';
+  readonly name = 'Gemini 2.5 Pro (Google API)';
   readonly vendor = 'Google';
-  readonly provider = 'gemini-web';
+  readonly provider = 'gemini-api';
   readonly protocolId = 'proto_gemini';
   readonly category: ThinkPortModelCategory = 'chat';
-  readonly sourceType: ThinkPortModelSourceType = 'web';
-  readonly badge = 'Web AI';
-  readonly description = 'Google Gemini 2.5 Pro web oturumu köprüsü.';
+  readonly sourceType: ThinkPortModelSourceType = 'external';
+  readonly badge = 'Direct REST API';
+  readonly description = 'Google Gemini 2.5 Pro doğrudan REST API bağlantısı (1M Token bağlam penceresi).';
   readonly sourceFile = 'src/models/definitions/Gemini25ProModel.ts';
+  override readonly hostingApp = 'Google Cloud REST API';
+  override readonly accessType = 'Doğrudan REST API';
   readonly contextWindow = 1000000;
   readonly maxOutputTokens = 16384;
-  readonly webModel = 'openai-fast';
   readonly fallbackLocal = 'gemma4:e4b';
 
   readonly aliases: readonly string[] = [

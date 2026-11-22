@@ -9,7 +9,7 @@ import json
 import re
 import time
 import uuid
-from typing import AsyncGenerator, Callable, Dict, Any, List, Optional, Tuple, Union
+from typing import AsyncGenerator, Callable, Dict, Any, List, Literal, Optional, Tuple, Union
 from app.core.config import settings
 from app.core.exceptions import gateway_timeout_error
 from app.core.logger import gateway_logger
@@ -28,6 +28,8 @@ from app.dtos.chat_dto import (
 from app.dtos.model_dto import ModelDefinitionDTO
 from app.dtos.user_dto import AuthenticatedUserContextDTO
 from app.dtos.admin_dto import RecordUsageInputDTO
+from app.models.registry import model_registry
+from app.models.web_browser_model import IWebBrowserModel
 from app.repositories.session_repository import SessionRepository
 from app.repositories.telemetry_repository import StreamChannelRepository
 from app.repositories.conversation_repository import (
@@ -52,6 +54,21 @@ from app.repositories.postgres_db import postgres_db
 
 ALL_GATEWAY_TOOL_NAMES = GATEWAY_MEMORY_TOOL_NAMES | GATEWAY_BROWSER_TOOL_NAMES
 
+ChatRoleLiteral = Literal["system", "user", "assistant", "developer", "tool"]
+
+
+def _normalize_chat_role(role: Optional[str]) -> ChatRoleLiteral:
+    """Ham rol dizgesini ChatMessageDTO için geçerli Literal rol değerine dönüştürür."""
+    if role == "system":
+        return "system"
+    if role == "assistant":
+        return "assistant"
+    if role == "developer":
+        return "developer"
+    if role == "tool":
+        return "tool"
+    return "user"
+
 
 class ChatService:
     """
@@ -71,7 +88,7 @@ class ChatService:
         session_repo: SessionRepository,
         channel_repo: StreamChannelRepository,
         conversation_repo: ConversationRepository,
-        record_usage_fn: Callable[[RecordUsageInputDTO], None],
+        record_usage_fn: Callable[[RecordUsageInputDTO], Any],
     ) -> None:
         self._auth_service = auth_service
         self._model_service = model_service
@@ -188,7 +205,7 @@ class ChatService:
         elif request.gozlemci_devre_disi is False or request.skip_observer is False:
             gozlemci_aktif_mi = True
         elif request.gozlemci_aktif_mi is not None:
-            gozlemci_aktif_mi = bool(request.gozlemci_aktif_mi)
+            gozlemci_aktif_mi = request.gozlemci_aktif_mi
 
         prompt_tokens = self._formatter.estimate_prompt_tokens(request.messages)
         source = (
@@ -807,10 +824,15 @@ class ChatService:
         primary_tc = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
         fn_obj = (primary_tc.get("function") or {}) if isinstance(primary_tc, dict) else {}
         tc_name = str(fn_obj.get("name") or "tool")
-        raw_args = fn_obj.get("arguments")
+        raw_args_val = fn_obj.get("arguments")
+        raw_args_str = (
+            json.dumps(raw_args_val, ensure_ascii=False)
+            if isinstance(raw_args_val, dict)
+            else (raw_args_val if isinstance(raw_args_val, str) else "")
+        )
 
         salvaged_dict, is_json_truncated, cut_off_tail = (
-            agent_memory_service.salvage_generic_json_arguments(raw_args)
+            agent_memory_service.salvage_generic_json_arguments(raw_args_str)
         )
         if salvaged_dict is not None and isinstance(primary_tc.get("function"), dict):
             primary_tc["function"]["arguments"] = json.dumps(
@@ -897,7 +919,7 @@ class ChatService:
             )
             base_text_messages = [
                 ChatMessageDTO(
-                    role=str(m.get("role") or "user"),
+                    role=_normalize_chat_role(m.get("role")),
                     content=str(m.get("content") or ""),
                 )
                 for m in prepared_orig.text_only_messages
@@ -936,34 +958,51 @@ class ChatService:
             self._job_finish_reasons.pop(cont_job.job_id, None)
             added_tokens += cont_tokens
             if cont_reasoning:
-                reasoning_text = (
-                    f"{reasoning_text}\n\n{cont_reasoning}".strip()
-                    if reasoning_text
-                    else cont_reasoning
-                )
+                r_base = (reasoning_text or "").strip()
+                r_cont = cont_reasoning.strip()
+                reasoning_text = f"{r_base}\n\n{r_cont}".strip() if r_base else r_cont
 
             next_raw_args: Any = None
             if cont_tcs and isinstance(cont_tcs, list) and len(cont_tcs) > 0:
                 first_cont_tc = cont_tcs[0] if isinstance(cont_tcs[0], dict) else {}
-                next_raw_args = (first_cont_tc.get("function") or {}).get("arguments")
+                next_fn_obj = first_cont_tc.get("function")
+                if isinstance(next_fn_obj, dict):
+                    next_raw_args = next_fn_obj.get("arguments")
             elif cont_content:
                 next_raw_args = cont_content
 
             if not next_raw_args:
                 break
 
+            if isinstance(next_raw_args, dict):
+                next_raw_args_str = json.dumps(next_raw_args, ensure_ascii=False)
+            elif isinstance(next_raw_args, str):
+                next_raw_args_str = next_raw_args
+            else:
+                break
+
             next_dict, is_json_truncated, cut_off_tail = (
-                agent_memory_service.salvage_generic_json_arguments(next_raw_args)
+                agent_memory_service.salvage_generic_json_arguments(next_raw_args_str)
             )
             if not next_dict:
                 break
 
-            salvaged_dict, added_count = agent_memory_service.merge_generic_json_arguments(
-                salvaged_dict, next_dict
-            )
-            primary_tc["function"]["arguments"] = json.dumps(
-                salvaged_dict, ensure_ascii=False
-            )
+            if salvaged_dict is None:
+                salvaged_dict = next_dict
+                added_count = len(next_dict)
+            else:
+                salvaged_dict, added_count = agent_memory_service.merge_generic_json_arguments(
+                    salvaged_dict, next_dict
+                )
+            fn_dict = primary_tc.get("function")
+            if isinstance(fn_dict, dict):
+                fn_dict["arguments"] = json.dumps(
+                    salvaged_dict, ensure_ascii=False
+                )
+            else:
+                primary_tc["function"] = {
+                    "arguments": json.dumps(salvaged_dict, ensure_ascii=False)
+                }
             tool_calls = [primary_tc]
             gateway_logger.info(
                 f"OBSERVER_CONTINUATION_MERGED | id={current_job.job_id} | step={obs_step} "
@@ -1033,7 +1072,7 @@ class ChatService:
             )
             base_text_messages.append(
                 ChatMessageDTO(
-                    role=str(m.get("role") or "user"),
+                    role=_normalize_chat_role(m.get("role")),
                     content=str(m.get("content") or ""),
                     name=getattr(orig_m, "name", None) if orig_m else None,
                     tool_call_id=getattr(orig_m, "tool_call_id", None) if orig_m else None,
@@ -2101,13 +2140,14 @@ class ChatService:
 
         def _on_provider_finish_reason(fr: str) -> None:
             if fr:
-                finish_reason_holder[-1] = str(fr)
+                finish_reason_holder[-1] = fr
 
         def _on_proxy_used(route: str) -> None:
             nonlocal upstream_name
             if route:
                 upstream_name = f"{base_upstream} | proxy: {route}"
 
+        coro: Any = None
         try:
             if image_def:
                 base_upstream = f"pollinations-image ({image_def.image_model or 'flux'})"
@@ -2116,24 +2156,96 @@ class ChatService:
                     image_def, prepared, channel, session_id
                 )
             elif web_def:
-                base_upstream = f"pollinations-web ({web_def.web_model or 'openai-fast'})"
-                upstream_name = base_upstream
-                coro = self._run_web_model_branch(
-                    web_def,
-                    prepared,
-                    loop,
-                    channel,
-                    session_id,
-                    response_format=job.response_format,
-                    temperature=job.temperature,
-                    tools=job.tools,
-                    tool_choice=job.tool_choice,
-                    max_tokens=job.max_tokens,
-                    on_finish_reason=_on_provider_finish_reason,
-                    preferred_proxy=preferred_proxy,
-                    on_proxy_used=_on_proxy_used,
-                    reasoning_effort=job.reasoning_effort,
-                )
+                provider_code = (web_def.provider or "").lower()
+                vendor_code = (web_def.vendor or "").lower()
+                model_id_code = (web_def.id or "").lower()
+
+                if "gemini" in provider_code or "google" in vendor_code or "gemini" in model_id_code:
+                    base_upstream = f"google-gemini ({web_def.id})"
+                    upstream_name = base_upstream
+                    coro = self._run_gemini_branch(
+                        web_def,
+                        prepared,
+                        loop,
+                        channel,
+                        session_id,
+                        conversation_id=job.conversation_id,
+                        response_format=job.response_format,
+                        temperature=job.temperature,
+                        max_tokens=job.max_tokens,
+                        on_finish_reason=_on_provider_finish_reason,
+                        on_proxy_used=_on_proxy_used,
+                    )
+                elif "claude" in provider_code or "anthropic" in vendor_code or "claude" in model_id_code:
+                    base_upstream = f"anthropic-claude ({web_def.id})"
+                    upstream_name = base_upstream
+                    coro = self._run_claude_branch(
+                        web_def,
+                        prepared,
+                        loop,
+                        channel,
+                        session_id,
+                        response_format=job.response_format,
+                        temperature=job.temperature,
+                        max_tokens=job.max_tokens,
+                        on_finish_reason=_on_provider_finish_reason,
+                        on_proxy_used=_on_proxy_used,
+                    )
+                elif "deepseek" in provider_code or "deepseek" in vendor_code or "deepseek" in model_id_code:
+                    base_upstream = f"deepseek ({web_def.id})"
+                    upstream_name = base_upstream
+                    coro = self._run_deepseek_branch(
+                        web_def,
+                        prepared,
+                        loop,
+                        channel,
+                        session_id,
+                        response_format=job.response_format,
+                        temperature=job.temperature,
+                        max_tokens=job.max_tokens,
+                        on_finish_reason=_on_provider_finish_reason,
+                        on_proxy_used=_on_proxy_used,
+                    )
+                elif model_id_code == "chatgpt-web" or (
+                    isinstance(model_registry.get(web_def.id), IWebBrowserModel)
+                    and "gemini" not in model_id_code
+                ):
+                    browser_model = model_registry.get(web_def.id)
+                    base_upstream = f"web-browser ({web_def.id})"
+                    upstream_name = base_upstream
+                    coro = self._run_web_browser_branch(
+                        web_def,
+                        browser_model,  # type: ignore[arg-type]
+                        prepared,
+                        loop,
+                        channel,
+                        session_id,
+                        conversation_id=job.conversation_id,
+                        response_format=job.response_format,
+                        temperature=job.temperature,
+                        max_tokens=job.max_tokens,
+                        on_finish_reason=_on_provider_finish_reason,
+                        on_proxy_used=_on_proxy_used,
+                    )
+                else:
+                    base_upstream = f"openai-web ({web_def.web_model or 'openai-fast'})"
+                    upstream_name = base_upstream
+                    coro = self._run_openai_web_branch(
+                        web_def,
+                        prepared,
+                        loop,
+                        channel,
+                        session_id,
+                        response_format=job.response_format,
+                        temperature=job.temperature,
+                        tools=job.tools,
+                        tool_choice=job.tool_choice,
+                        max_tokens=job.max_tokens,
+                        on_finish_reason=_on_provider_finish_reason,
+                        preferred_proxy=preferred_proxy,
+                        on_proxy_used=_on_proxy_used,
+                        reasoning_effort=job.reasoning_effort,
+                    )
             else:
                 base_upstream = f"ollama-local ({job.model})"
                 upstream_name = base_upstream
@@ -2151,6 +2263,9 @@ class ChatService:
                     on_finish_reason=_on_provider_finish_reason,
                 )
 
+            if coro is None:
+                return
+
             exec_timeout_sec = float(
                 settings.ollama_timeout_sec
                 if (not image_def and not web_def)
@@ -2164,10 +2279,15 @@ class ChatService:
             if not success:
                 err_detail = (
                     f"Model '{job.requested_model or job.model}' ({job.model}) alt sağlayıcısına "
-                    f"('{upstream_name}') şu anda erişilemedi veya zaman aşımına uğradı."
+                    f"('{upstream_name}') şu anda erişilemedi veya zaman aşımına uğradı. "
+                    f"Başka bir modele yönlendirme yapılmadı."
                 )
                 if job.source == "studio":
-                    err_msg = f"[Web AI Gateway Uyarısı: '{job.model}' sağlayıcısına şu anda erişilemedi. Lütfen internet bağlantınızı kontrol edin veya tekrar deneyin.]"
+                    err_msg = (
+                        f"⚠️ **Model Erişim Hatası (`{job.model}`):** "
+                        f"Seçtiğiniz `{job.model}` modeline (`{upstream_name}`) şu anda erişilemedi veya yanıt alınamadı. "
+                        f"Başka bir modele otomatik yönlendirme yapılmadı; lütfen ilgili servis, oturum veya proxy bağlantısını kontrol edip tekrar deneyin."
+                    )
                     await channel.put(
                         {
                             "event": "delta",
@@ -2269,7 +2389,149 @@ class ChatService:
         await channel.put({"event": "delta", "text": md_output, "session_id": session_id})
         return True
 
-    async def _run_web_model_branch(
+    async def _run_gemini_branch(
+        self,
+        web_def: ModelDefinitionDTO,
+        prepared: PreparedMessagesDTO,
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+        conversation_id: str = "",
+        response_format: Optional[Dict[str, Any]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır."""
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
+        success = await asyncio.to_thread(
+            self._llm_provider.stream_from_gemini,
+            web_def.id,
+            prepared.multimodal_messages,
+            delta_cb,
+            requested_model_id=web_def.id,
+            conversation_id=conversation_id,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            on_finish_reason=on_finish_reason,
+            on_proxy_used=on_proxy_used,
+            on_reasoning=reasoning_cb,
+        )
+        if success:
+            return True
+
+        gateway_logger.warning(
+            f"Google Gemini yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | istem={web_def.id}"
+        )
+        return False
+
+    async def _run_web_browser_branch(
+        self,
+        web_def: ModelDefinitionDTO,
+        browser_model: IWebBrowserModel,
+        prepared: PreparedMessagesDTO,
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+        conversation_id: str = "",
+        response_format: Optional[Dict[str, Any]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """IWebBrowserModel arayüzünü uygulayan sanal tarayıcı modelini çalıştırır (örn. chatgpt-web). Başarısız olursa başka modele geçmez."""
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
+        success = await asyncio.to_thread(
+            self._llm_provider.stream_from_web_browser_model,
+            browser_model,
+            prepared.multimodal_messages,
+            delta_cb,
+            conversation_id=conversation_id,
+            on_finish_reason=on_finish_reason,
+            on_proxy_used=on_proxy_used,
+            on_reasoning=reasoning_cb,
+        )
+        if success:
+            return True
+
+        gateway_logger.warning(
+            f"{browser_model.name} yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | istem={web_def.id}"
+        )
+        return False
+
+    async def _run_claude_branch(
+        self,
+        web_def: ModelDefinitionDTO,
+        prepared: PreparedMessagesDTO,
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+        response_format: Optional[Dict[str, Any]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Anthropic Claude modelini doğrudan çalıştırır. Başarısız olursa başka modele geçmez."""
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        success = await asyncio.to_thread(
+            self._llm_provider.stream_from_claude,
+            web_def.id,
+            prepared.multimodal_messages,
+            delta_cb,
+            web_def.id,
+            temperature,
+            max_tokens,
+            on_finish_reason,
+            on_proxy_used,
+        )
+        if success:
+            return True
+
+        gateway_logger.warning(
+            f"Anthropic Claude yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | istem={web_def.id}"
+        )
+        return False
+
+    async def _run_deepseek_branch(
+        self,
+        web_def: ModelDefinitionDTO,
+        prepared: PreparedMessagesDTO,
+        loop: asyncio.AbstractEventLoop,
+        channel: asyncio.Queue,
+        session_id: str,
+        response_format: Optional[Dict[str, Any]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """DeepSeek modelini doğrudan çalıştırır. Başarısız olursa başka modele geçmez."""
+        delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        success = await asyncio.to_thread(
+            self._llm_provider.stream_from_deepseek,
+            web_def.id,
+            prepared.multimodal_messages,
+            delta_cb,
+            web_def.id,
+            temperature,
+            max_tokens,
+            on_finish_reason,
+            on_proxy_used,
+        )
+        if success:
+            return True
+
+        gateway_logger.warning(
+            f"DeepSeek yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | istem={web_def.id}"
+        )
+        return False
+
+    async def _run_openai_web_branch(
         self,
         web_def: ModelDefinitionDTO,
         prepared: PreparedMessagesDTO,
@@ -2286,7 +2548,7 @@ class ChatService:
         on_proxy_used: Optional[Callable[[str], None]] = None,
         reasoning_effort: Optional[str] = None,
     ) -> bool:
-        """Web AI sağlayıcısını çalıştırır; ulaşılamazsa yerel Ollama yedek modeline düşer."""
+        """OpenAI / ChatGPT Web AI sağlayıcısını çalıştırır. Başarısız olursa başka modele geçmez."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
         tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
@@ -2332,25 +2594,9 @@ class ChatService:
         if success:
             return True
 
-        fallback_local = self._model_service.select_best_local_model(web_def.fallback_local)
-        if fallback_local:
-            gateway_logger.info(
-                f"Web AI yanıt vermedi, yerel Ollama yedek modeline geçiliyor | istem={web_def.id} | fallback={fallback_local}"
-            )
-            return await asyncio.to_thread(
-                self._llm_provider.stream_from_ollama,
-                fallback_local,
-                prepared.text_only_messages,
-                delta_cb,
-                response_format,
-                temperature,
-                tools,
-                tool_choice,
-                tools_cb,
-                reasoning_cb,
-                max_tokens,
-                on_finish_reason,
-            )
+        gateway_logger.warning(
+            f"Web AI yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | istem={web_def.id}"
+        )
         return False
 
     async def _run_local_model_branch(
@@ -2368,7 +2614,7 @@ class ChatService:
         on_finish_reason: Optional[Callable[[str], None]] = None,
         reasoning_effort: Optional[str] = None,
     ) -> bool:
-        """Yerel Ollama modelinden akış alır; Ollama kapalıysa otomatik olarak Web AI köprüsünü kullanır."""
+        """Yerel Ollama modelinden akış alır; ulaşılamazsa başka modele geçmeden hata döndürür."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
         tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
@@ -2385,9 +2631,6 @@ class ChatService:
             reasoning_cb,
             max_tokens,
             on_finish_reason,
-            None,
-            None,
-            reasoning_effort,
         )
         if not success and prepared.has_multimodal:
             success = await asyncio.to_thread(
@@ -2407,24 +2650,10 @@ class ChatService:
         if success:
             return True
 
-        return await asyncio.to_thread(
-            self._llm_provider.stream_from_pollinations_web,
-            "openai-fast",
-            prepared.text_only_messages,
-            delta_cb,
-            model_id,
-            response_format,
-            temperature,
-            tools,
-            tool_choice,
-            tools_cb,
-            reasoning_cb,
-            max_tokens,
-            on_finish_reason,
-            None,
-            None,
-            reasoning_effort,
+        gateway_logger.warning(
+            f"Yerel Ollama modeli yanıt vermedi; sessiz fallback kapalı olduğu için hata döndürülüyor | model={model_id}"
         )
+        return False
 
     @staticmethod
     def _create_threadsafe_delta_callback(

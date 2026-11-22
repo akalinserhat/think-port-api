@@ -12,18 +12,19 @@ import {
 
 export class Claude35SonnetModel extends BaseThinkPortModel {
   readonly id = 'claude-3-5-sonnet';
-  readonly name = 'Claude 3.5 Sonnet (Web Gateway)';
+  readonly name = 'Claude 3.5 Sonnet (Anthropic API)';
   readonly vendor = 'Anthropic';
-  readonly provider = 'claude-web';
+  readonly provider = 'anthropic-api';
   readonly protocolId = 'proto_anthropic';
   readonly category: ThinkPortModelCategory = 'chat';
-  readonly sourceType: ThinkPortModelSourceType = 'web';
-  readonly badge = 'Web AI';
-  readonly description = 'Anthropic Claude 3.5 Sonnet web oturumu köprüsü.';
+  readonly sourceType: ThinkPortModelSourceType = 'external';
+  readonly badge = 'Direct REST API';
+  readonly description = 'Anthropic Claude 3.5 Sonnet doğrudan REST API bağlantısı (Anthropic Messages API).';
   readonly sourceFile = 'src/models/definitions/Claude35SonnetModel.ts';
+  override readonly hostingApp = 'Anthropic Cloud REST API';
+  override readonly accessType = 'Doğrudan REST API';
   readonly contextWindow = 200000;
   readonly maxOutputTokens = 8192;
-  readonly webModel = 'openai-fast';
   readonly fallbackLocal = 'qwen2.5:14b';
 
   readonly aliases: readonly string[] = [

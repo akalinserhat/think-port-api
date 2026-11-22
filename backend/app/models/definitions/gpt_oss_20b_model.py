@@ -78,7 +78,4 @@ class GptOss20BModel(BaseThinkPortModel):
             "gpt-4o",
             "gpt-4o-mini",
             "chatgpt",
-            "claude-3-5-sonnet",
-            "gemini-2.5-pro",
-            "deepseek-r1",
         ]

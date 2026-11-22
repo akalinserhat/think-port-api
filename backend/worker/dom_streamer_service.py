@@ -1,10 +1,24 @@
 import asyncio
 import json
-from typing import Dict
-import redis.asyncio as redis
-from playwright.async_api import Page, Locator
-from worker.dtos import BrowserJobDTO, ProviderSelectorsDTO, RedisStreamEventDTO
-from worker.session_pool import WarmTabSession
+from typing import Any, Dict, Optional, Union
+
+try:
+    import redis.asyncio as redis  # type: ignore
+except ImportError:
+    redis = None  # type: ignore
+
+try:
+    from playwright.async_api import Page, Locator  # type: ignore
+except ImportError:
+    Page = Any  # type: ignore
+    Locator = Any  # type: ignore
+
+try:
+    from .dtos import BrowserJobDTO, ProviderSelectorsDTO, RedisStreamEventDTO
+    from .session_pool import WarmTabSession
+except (ImportError, ValueError):
+    from worker.dtos import BrowserJobDTO, ProviderSelectorsDTO, RedisStreamEventDTO  # type: ignore
+    from worker.session_pool import WarmTabSession  # type: ignore
 
 
 PROVIDER_SELECTORS: Dict[str, ProviderSelectorsDTO] = {
@@ -20,6 +34,42 @@ PROVIDER_SELECTORS: Dict[str, ProviderSelectorsDTO] = {
         assistant_message=".font-claude-message",
         streaming_indicator='button[aria-label="Stop Response"]',
     ),
+    "deepseek-web": ProviderSelectorsDTO(
+        prompt_input="textarea#chat-input",
+        send_button='div[role="button"][aria-label="Send"]',
+        assistant_message=".ds-markdown",
+        streaming_indicator=".ds-loading",
+    ),
+    "gemini-web": ProviderSelectorsDTO(
+        prompt_input=".ql-editor",
+        send_button='button[aria-label="Send message"]',
+        assistant_message="message-content",
+        streaming_indicator=".loading-spinner",
+    ),
+    "gpt-oss:20b": ProviderSelectorsDTO(
+        prompt_input="#prompt-textarea",
+        send_button='button[data-testid="send-button"]',
+        assistant_message='div[data-message-author-role="assistant"]',
+        streaming_indicator='button[data-testid="stop-button"]',
+    ),
+    "gpt-oss": ProviderSelectorsDTO(
+        prompt_input="#prompt-textarea",
+        send_button='button[data-testid="send-button"]',
+        assistant_message='div[data-message-author-role="assistant"]',
+        streaming_indicator='button[data-testid="stop-button"]',
+    ),
+    "browser-gateway": ProviderSelectorsDTO(
+        prompt_input="#prompt-textarea",
+        send_button='button[data-testid="send-button"]',
+        assistant_message='div[data-message-author-role="assistant"]',
+        streaming_indicator='button[data-testid="stop-button"]',
+    ),
+    "openai-fast": ProviderSelectorsDTO(
+        prompt_input="#prompt-textarea",
+        send_button='button[data-testid="send-button"]',
+        assistant_message='div[data-message-author-role="assistant"]',
+        streaming_indicator='button[data-testid="stop-button"]',
+    ),
 }
 
 
@@ -29,7 +79,7 @@ class DomStreamerService:
     Her metot yalnızca tek bir DOM veya yayın adımından sorumludur.
     """
 
-    def __init__(self, redis_client: redis.Redis) -> None:
+    def __init__(self, redis_client: Any) -> None:
         self._redis = redis_client
 
     async def execute_and_stream(
@@ -87,7 +137,8 @@ class DomStreamerService:
 
     async def publish_event(self, channel: str, event_dto: RedisStreamEventDTO) -> None:
         """Tek bir RedisStreamEventDTO nesnesini JSON olarak ilgili kanala yayınlar."""
-        await self._redis.publish(channel, json.dumps(event_dto.to_payload_dict()))
+        if self._redis is not None:
+            await self._redis.publish(channel, json.dumps(event_dto.to_payload_dict()))
 
     @staticmethod
     def _resolve_selectors(provider: str) -> ProviderSelectorsDTO:

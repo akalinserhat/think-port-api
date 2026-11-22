@@ -140,28 +140,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
           e.preventDefault();
           onSelectTab('browser');
         },
-        children: [
-          {
-            id: 'browser-sessions',
-            label: t('nav.browserSessions', 'Oturumlar'),
-            path: '/browser/sessions',
-            icon: <MonitorCheck size={17} />,
-            onClick: (_item, e) => {
-              e.preventDefault();
-              onSelectTab('browser');
-            },
-          },
-          {
-            id: 'browser-settings',
-            label: t('nav.browserSettings', 'Tarayıcı Ayarları'),
-            path: '/browser/settings',
-            icon: <SlidersHorizontal size={17} />,
-            onClick: (_item, e) => {
-              e.preventDefault();
-              onSelectTab('browser');
-            },
-          },
-        ],
       },
       {
         id: 'settings',
@@ -195,12 +173,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
       }
       if (item.id === 'nodes') {
         return activeTab === 'nodes' && nodesSubSection === 'dashboard';
-      }
-      if (item.id === 'browser-sessions') {
-        return activeTab === 'browser' && window.location.pathname.includes('/browser/sessions');
-      }
-      if (item.id === 'browser-settings') {
-        return activeTab === 'browser' && window.location.pathname.includes('/browser/settings');
       }
       if (item.id === 'browser') {
         return activeTab === 'browser';

@@ -10,6 +10,12 @@ export interface AIModelDTO {
   image_model?: string;
   web_model?: string;
   fallback_local?: string;
+  type?: string;
+  available?: boolean;
+  hosting_app?: string;
+  access_type?: string;
+  source_type?: string;
+  target_url?: string;
 }
 
 export interface UserTokenUsageItemDTO {

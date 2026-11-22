@@ -55,6 +55,12 @@ export interface IThinkPortModel {
   readonly description: string;
   /** Modelin tanımlandığı kaynak kod dosyası yolu */
   readonly sourceFile: string;
+  /** Modeli barındıran veya sağlayan uygulama / motor adı (Örn: 'Ollama (Port 11434)', '@akalin/browser_module', 'OpenAI API') */
+  readonly hostingApp?: string;
+  /** Erişim yöntemi açıklaması (Örn: 'Yerel Motor', 'Doğrudan REST API', 'Sanal Tarayıcı') */
+  readonly accessType?: string;
+  /** Sanal tarayıcı veya web oturumu hedef URL'si (Örn: 'https://gemini.google.com/app', 'https://chatgpt.com/') */
+  readonly targetUrl?: string;
   /** Yerel Ollama motorunda mı çalışıyor? */
   readonly isLocal: boolean;
   /** Görsel üretim modeli mi? */
@@ -100,6 +106,9 @@ export interface CreateThinkPortModelInput {
   sourceType: ThinkPortModelSourceType;
   badge: string;
   description: string;
+  hostingApp?: string;
+  accessType?: string;
+  targetUrl?: string;
   contextWindow: number;
   maxOutputTokens: number;
   fallbackLocal?: string;

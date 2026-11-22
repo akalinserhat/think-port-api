@@ -4,6 +4,8 @@
 
 export * from './IThinkPortModel';
 export * from './BaseThinkPortModel';
+export * from './IWebBrowserModel';
+export * from './BaseWebBrowserModel';
 export * from './definitions';
 export * from './ModelRegistry';
 

@@ -8,8 +8,14 @@ Yeni bir yapay zeka modeli eklemek için:
 """
 from typing import Any, Dict, List, Optional
 from app.models.base_model import IThinkPortModel
+from app.models.web_browser_model import IWebBrowserModel
 from app.models.definitions import (
     GptOss20BModel,
+    GeminiWebModel,
+    ChatGptWebModel,
+    Gemini25ProModel,
+    Claude35SonnetModel,
+    DeepSeekR1Model,
     Flux1Model,
     FluxRealismModel,
     FluxAnimeModel,
@@ -57,6 +63,10 @@ class ThinkPortModelRegistry:
             if not m.is_image and not m.is_local and m.category == "chat"
         ]
 
+    def list_web_browser_models(self) -> List[IWebBrowserModel]:
+        """IWebBrowserModel arayüzünü uygulayan sanal tarayıcı modellerini döner."""
+        return [m for m in self._models.values() if isinstance(m, IWebBrowserModel)]
+
     def list_image_models(self) -> List[IThinkPortModel]:
         """Görsel üretim modellerini döner."""
         return [m for m in self._models.values() if m.is_image or m.category == "image"]
@@ -97,6 +107,11 @@ class ThinkPortModelRegistry:
 
 DEFAULT_REGISTERED_MODELS: List[IThinkPortModel] = [
     GptOss20BModel(),
+    GeminiWebModel(),
+    ChatGptWebModel(),
+    Gemini25ProModel(),
+    Claude35SonnetModel(),
+    DeepSeekR1Model(),
     Flux1Model(),
     FluxRealismModel(),
     FluxAnimeModel(),

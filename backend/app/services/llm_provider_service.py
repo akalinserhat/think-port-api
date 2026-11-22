@@ -9,10 +9,14 @@ import re
 import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from app.core.config import settings
 from app.core.logger import gateway_logger
 from app.core.security import create_verified_ssl_context
+from app.models.registry import model_registry
+from app.models.web_browser_model import IWebBrowserModel
 from app.repositories.proxy_repository import proxy_module_db
 from app.services.message_formatter_service import MessageFormatterService
 
@@ -46,6 +50,7 @@ class _ProxiedHTTPSConnection(http.client.HTTPSConnection):
         if not proxy_node:
             raise ValueError("Strict Proxy Policy: proxy_node boş olamaz.")
         super().__init__(host, port, timeout=read_timeout, context=ssl_context)
+        self._ssl_context = ssl_context
         self._proxy_node = proxy_node
         self._connect_timeout = connect_timeout
         self._header_timeout = header_timeout
@@ -62,7 +67,7 @@ class _ProxiedHTTPSConnection(http.client.HTTPSConnection):
         )
         try:
             raw_sock.settimeout(max(self._connect_timeout, 5.0))
-            tls_sock = self._context.wrap_socket(raw_sock, server_hostname=self.host)
+            tls_sock = self._ssl_context.wrap_socket(raw_sock, server_hostname=self.host)
             tls_sock.settimeout(self._header_timeout)
             self.sock = tls_sock
             self.handshake_ms = max(5, int((time.perf_counter() - t_conn) * 1000))
@@ -270,7 +275,13 @@ class LlmProviderService:
         enriched_messages = [dict(m) for m in openai_messages]
         target_upstream = (
             "openai-fast"
-            if web_model in ("openai", "gemini", "claude-hybridspace", "deepseek-r1", "openai-fast")
+            if web_model in (
+                "openai",
+                "openai-fast",
+                "gpt-oss:20b",
+                "gpt-oss",
+                "chatgpt-web",
+            )
             else web_model
         )
 
@@ -318,6 +329,485 @@ class LlmProviderService:
             preferred_proxy=preferred_proxy,
             on_proxy_used=on_proxy_used,
         )
+
+    def stream_from_gemini(
+        self,
+        gemini_model: str,
+        openai_messages: List[Dict[str, Any]],
+        on_delta: Callable[[str], None],
+        requested_model_id: str = "",
+        conversation_id: str = "",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır.
+        1. GEMINI_API_KEY tanımlıysa Google Generative Language REST API (generativelanguage.googleapis.com) üzerinden SSE akışı yapar.
+        2. API anahtarı yoksa @akalin/browser_module (port 8002) üzerinden https://gemini.google.com/app sanal tarayıcısına bağlanır.
+        Hiçbir koşulda OpenAI veya text.pollinations.ai proxy köprüsüne gönderilmez.
+        """
+        target_model = "gemini-2.0-flash" if gemini_model in ("gemini-web", "gemini") else gemini_model
+        gateway_logger.info(
+            f"Google Gemini isteği yönlendiriliyor | model={gemini_model} -> {target_model} | hedef=Google (gemini.google.com / Google API)"
+        )
+
+        # 1. Google Generative Language API ile doğrudan SSE akışı
+        if settings.gemini_api_key:
+            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:streamGenerateContent?key={settings.gemini_api_key}&alt=sse"
+            contents = []
+            system_instruction = None
+            for msg in openai_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    system_instruction = {"parts": [{"text": str(content)}]}
+                else:
+                    g_role = "model" if role == "assistant" else "user"
+                    contents.append({"role": g_role, "parts": [{"text": str(content)}]})
+
+            payload: Dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": temperature if temperature is not None else 0.7,
+                    "maxOutputTokens": max_tokens or 4096,
+                },
+            }
+            if system_instruction:
+                payload["systemInstruction"] = system_instruction
+
+            try:
+                raw_bytes = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    api_url,
+                    data=raw_bytes,
+                    headers={"Content-Type": "application/json", "User-Agent": "ThinkPort-Gemini/1.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=settings.web_gateway_timeout_sec) as resp:
+                    for line_bytes in resp:
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            candidates = chunk.get("candidates") or []
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                for p in parts:
+                                    txt = p.get("text", "")
+                                    if txt:
+                                        on_delta(txt)
+                        except Exception:
+                            pass
+                    if on_finish_reason:
+                        on_finish_reason("stop")
+                    gateway_logger.info(
+                        f"Google Gemini REST API akışı tamamlandı | model={target_model} | upstream=generativelanguage.googleapis.com"
+                    )
+                    return True
+            except Exception as exc:
+                gateway_logger.warning(
+                    f"Google Gemini API çağrısı başarısız oldu (generativelanguage.googleapis.com): {exc}"
+                )
+
+        # 2. akalin-browser-module Sanal Tarayıcı (https://gemini.google.com/app)
+        gemini_browser_model = model_registry.get("gemini-web")
+        if isinstance(gemini_browser_model, IWebBrowserModel):
+            return self.stream_from_web_browser_model(
+                web_browser_model=gemini_browser_model,
+                openai_messages=openai_messages,
+                on_delta=on_delta,
+                conversation_id=conversation_id,
+                on_finish_reason=on_finish_reason,
+                on_proxy_used=on_proxy_used,
+                on_reasoning=on_reasoning,
+            )
+
+        return False
+
+    def stream_from_web_browser_model(
+        self,
+        web_browser_model: IWebBrowserModel,
+        openai_messages: List[Dict[str, Any]],
+        on_delta: Callable[[str], None],
+        conversation_id: str = "",
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
+        max_retries: int = 5,
+    ) -> bool:
+        """
+        IWebBrowserModel arayüzünü uygulayan herhangi bir sanal tarayıcı modelini
+        (GeminiWebModel -> https://gemini.google.com/app, ChatGptWebModel -> https://chatgpt.com/ vb.)
+        @akalin/browser_module (Docker Playwright) üzerinden ortak sözleşmeyle çalıştırır.
+        Proxy/bağlantı hatasında hata mesajı göstermeden arka arkaya `max_retries` (varsayılan 5)
+        kez yeni proxy IP'si ile tekrar dener ve ilerlemeyi `on_reasoning` üzerinden `x/5` biçiminde bildirir.
+        """
+        try:
+            from app.services.browser_tool_service import browser_tool_service
+
+            target_url = web_browser_model.target_url
+            user_prompt = ""
+            for m in reversed(openai_messages):
+                if m.get("role") == "user":
+                    user_prompt = str(m.get("content", ""))
+                    break
+
+            conv_id = conversation_id or f"{web_browser_model.session_prefix}-{int(time.time()) // 3600}"
+            total_attempts = max(1, max_retries)
+            exclude_proxy_ids: List[str] = []
+            next_proxy_override: Optional[Dict[str, Any]] = None
+            parsed_res: Optional[Dict[str, Any]] = None
+
+            for attempt in range(1, total_attempts + 1):
+                if on_reasoning:
+                    if attempt == 1:
+                        on_reasoning(f"🌐 {web_browser_model.name} bağlantısı kuruluyor ({attempt}/{total_attempts})...\n")
+                    else:
+                        on_reasoning(f"🔄 Yeni proxy IP'si ile yeniden deneniyor ({attempt}/{total_attempts})...\n")
+
+                tool_args: Dict[str, Any] = {
+                    "url": target_url,
+                    "text": user_prompt,
+                    "use_proxy": web_browser_model.use_proxy,
+                }
+                if next_proxy_override:
+                    tool_args["proxy_override"] = next_proxy_override
+                if exclude_proxy_ids:
+                    tool_args["exclude_proxy_ids"] = list(exclude_proxy_ids)
+
+                raw_res = browser_tool_service.execute_browser_tool(
+                    tool_name="thinkport_browser_prompt_llm",
+                    raw_arguments=tool_args,
+                    conversation_id=conv_id,
+                )
+                candidate = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
+                if isinstance(candidate, dict) and not candidate.get("error"):
+                    parsed_res = candidate
+                    break
+
+                err_msg = (
+                    str(candidate.get("error"))
+                    if isinstance(candidate, dict)
+                    else "Bilinmeyen tarayıcı hatası"
+                )
+                failed_proxy_id = candidate.get("proxy_id") if isinstance(candidate, dict) else None
+                if failed_proxy_id and str(failed_proxy_id) not in exclude_proxy_ids:
+                    exclude_proxy_ids.append(str(failed_proxy_id))
+
+                replacement_proxy = (
+                    candidate.get("replacement_proxy")
+                    if isinstance(candidate, dict)
+                    else None
+                )
+                next_proxy_override = (
+                    replacement_proxy if isinstance(replacement_proxy, dict) else None
+                )
+                requires_auth = bool(candidate.get("requires_auth")) if isinstance(candidate, dict) else False
+
+                gateway_logger.warning(
+                    f"{web_browser_model.name} deneme {attempt}/{total_attempts} başarısız: {err_msg}"
+                )
+                if requires_auth or attempt >= total_attempts:
+                    return False
+
+            if not parsed_res:
+                return False
+
+            title = str(parsed_res.get("title") or web_browser_model.name)
+            resolved_url = str(parsed_res.get("url") or target_url)
+            model_text = str(parsed_res.get("text") or "").strip()
+            latency = parsed_res.get("latency_ms", 0)
+            inspection = parsed_res.get("inspection") or {}
+            api_endpoints = inspection.get("api_endpoints") or []
+            wiz_data = inspection.get("wiz_global_data") or {}
+            chat_inputs = inspection.get("chat_inputs") or []
+
+            # İlk IP adresini tespit et
+            primary_ip = ""
+            for ep in api_endpoints:
+                if ep.get("ip_address"):
+                    primary_ip = f"{ep.get('ip_address')}:{ep.get('port', 443)}"
+                    break
+
+            route_label = "Docker Playwright Chromium (akalin-virtual-browser:8002)"
+            if primary_ip:
+                route_label += f" -> {primary_ip}"
+
+            gateway_logger.info(
+                f"{web_browser_model.name} Sanal Tarayıcı akışı tamamlandı: {resolved_url} | IP={primary_ip} | süre={latency}ms"
+            )
+            if on_proxy_used:
+                on_proxy_used(route_label)
+
+            # Temizlenmiş model metni
+            clean_text = model_text
+            strip_prefix = web_browser_model.response_prefix_to_strip
+            if strip_prefix and clean_text.lower().startswith(strip_prefix.lower()):
+                clean_text = clean_text[len(strip_prefix):].strip()
+
+            # Modelin kendi özel çıktı biçimlendirmesi varsa (örn. ChatGptWebModel -> yalnızca SAYFA METNİ)
+            custom_formatted = web_browser_model.format_browser_response(
+                clean_text,
+                {
+                    "title": title,
+                    "url": resolved_url,
+                    "latency_ms": latency,
+                    "requires_auth": bool(parsed_res.get("requires_auth")),
+                    "primary_ip": primary_ip,
+                    "inspection": inspection,
+                },
+            )
+            if custom_formatted is not None:
+                for chunk in custom_formatted.splitlines(keepends=True):
+                    on_delta(chunk)
+                if on_finish_reason:
+                    on_finish_reason("stop")
+                return True
+
+            # Kullanıcıya şeffaf telemetri ve tespit edilen uç noktalar
+            browser_reply_parts = [
+                f"🌐 **Model Sağlayıcısı:** {web_browser_model.vendor} (`{web_browser_model.id}` / {web_browser_model.name})\n",
+                f"🖥️ **Sanal Tarayıcı Motoru:** Docker Playwright Chromium (`akalin-virtual-browser:8002`)\n",
+                f"🎯 **Hedef URL:** [{resolved_url}]({resolved_url}) (Başlık: `{title}`)\n",
+            ]
+
+            if primary_ip:
+                browser_reply_parts.append(
+                    f"📡 **Bağlanılan Sunucu IP:** `{primary_ip}` ({web_browser_model.vendor})\n"
+                )
+
+            if api_endpoints:
+                browser_reply_parts.append(
+                    f"\n🔍 **Tespit Edilen API Uç Noktaları (Son {min(len(api_endpoints), 3)}):**\n"
+                )
+                for ep in api_endpoints[:3]:
+                    ep_url = ep.get("base_url") or ep.get("url", "")
+                    ep_ip = ep.get("ip_address") or primary_ip or "-"
+                    ep_status = ep.get("status") or 200
+                    browser_reply_parts.append(
+                        f"- `{ep_url}` | **IP:** `{ep_ip}` | **Durum:** `{ep_status}`\n"
+                    )
+
+            dynamic_details = []
+            if wiz_data.get("FdrFJe"):
+                dynamic_details.append(f"Session Token (`FdrFJe`): `{wiz_data.get('FdrFJe')}`")
+            if wiz_data.get("cfb2h"):
+                dynamic_details.append(f"Build Sürümü (`cfb2h`): `{wiz_data.get('cfb2h')}`")
+            if chat_inputs:
+                dynamic_details.append(f"Giriş Alanı: `{chat_inputs[0].get('selector')}`")
+            if inspection.get("cookies_count"):
+                dynamic_details.append(f"Aktif Çerezler: `{inspection.get('cookies_count')} adet`")
+
+            if dynamic_details:
+                browser_reply_parts.append("\n🛡️ **Dinamik Tarayıcı Güvenlik Kontrolleri:**\n")
+                for dt in dynamic_details:
+                    browser_reply_parts.append(f"- {dt}\n")
+
+            browser_reply_parts.append("\n---\n\n")
+
+            if parsed_res.get("requires_auth"):
+                browser_reply_parts.append(
+                    "> [!NOTE]\n"
+                    f"> **{web_browser_model.name} Oturum Bilgisi:**\n"
+                    f"> Sanal tarayıcı `{web_browser_model.auth_notice_domain}` adresine bağlandı ancak oturum açma ekranı ile karşılaşıldı. "
+                    f"{web_browser_model.name} üzerinde tam sohbet oturumu için sanal tarayıcıda bir kez oturum açılması veya API anahtarı girilmesi önerilir.\n"
+                )
+            elif clean_text:
+                browser_reply_parts.append(clean_text)
+            else:
+                browser_reply_parts.append(model_text)
+
+            full_reply = "".join(browser_reply_parts)
+            for chunk in full_reply.splitlines(keepends=True):
+                on_delta(chunk)
+
+            if on_finish_reason:
+                on_finish_reason("stop")
+            return True
+        except Exception as exc:
+            gateway_logger.warning(f"{web_browser_model.name} Sanal Tarayıcı erişim hatası: {exc}")
+
+        return False
+
+    def stream_from_chatgpt_web(
+        self,
+        openai_messages: List[Dict[str, Any]],
+        on_delta: Callable[[str], None],
+        conversation_id: str = "",
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        ChatGptWebModel (IWebBrowserModel) üzerinden https://chatgpt.com/ sanal tarayıcısına bağlanır.
+        """
+        chatgpt_browser_model = model_registry.get("chatgpt-web")
+        if isinstance(chatgpt_browser_model, IWebBrowserModel):
+            return self.stream_from_web_browser_model(
+                web_browser_model=chatgpt_browser_model,
+                openai_messages=openai_messages,
+                on_delta=on_delta,
+                conversation_id=conversation_id,
+                on_finish_reason=on_finish_reason,
+                on_proxy_used=on_proxy_used,
+            )
+        return False
+
+    def stream_from_claude(
+        self,
+        claude_model: str,
+        openai_messages: List[Dict[str, Any]],
+        on_delta: Callable[[str], None],
+        requested_model_id: str = "",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        Anthropic Claude modelini doğrudan çalıştırır (api.anthropic.com veya claude.ai sanal tarayıcısı).
+        Hiçbir koşulda OpenAI veya text.pollinations.ai proxy köprüsüne gönderilmez.
+        """
+        target_model = "claude-3-5-sonnet-20241022" if claude_model in ("claude-web", "claude-3-5-sonnet") else claude_model
+        gateway_logger.info(
+            f"Anthropic Claude isteği yönlendiriliyor | model={claude_model} -> {target_model} | hedef=Anthropic (api.anthropic.com / claude.ai)"
+        )
+        if settings.anthropic_api_key:
+            api_url = "https://api.anthropic.com/v1/messages"
+            system_prompt = ""
+            user_msgs = []
+            for m in openai_messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    system_prompt = str(content)
+                else:
+                    c_role = "assistant" if role == "assistant" else "user"
+                    user_msgs.append({"role": c_role, "content": str(content)})
+
+            payload: Dict[str, Any] = {
+                "model": target_model,
+                "messages": user_msgs,
+                "max_tokens": max_tokens or 4096,
+                "stream": True,
+            }
+            if system_prompt:
+                payload["system"] = system_prompt
+            if temperature is not None:
+                payload["temperature"] = temperature
+
+            try:
+                raw_bytes = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    api_url,
+                    data=raw_bytes,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": settings.anthropic_api_key,
+                        "anthropic-version": "2023-06-01",
+                        "User-Agent": "ThinkPort-Claude/1.0",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=settings.web_gateway_timeout_sec) as resp:
+                    for line_bytes in resp:
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            c_type = chunk.get("type")
+                            if c_type == "content_block_delta":
+                                delta_text = chunk.get("delta", {}).get("text", "")
+                                if delta_text:
+                                    on_delta(delta_text)
+                        except Exception:
+                            pass
+                    if on_finish_reason:
+                        on_finish_reason("stop")
+                    gateway_logger.info(f"Anthropic Claude API akışı tamamlandı | model={target_model}")
+                    return True
+            except Exception as exc:
+                gateway_logger.warning(f"Anthropic Claude API hatası (api.anthropic.com): {exc}")
+
+        return False
+
+    def stream_from_deepseek(
+        self,
+        deepseek_model: str,
+        openai_messages: List[Dict[str, Any]],
+        on_delta: Callable[[str], None],
+        requested_model_id: str = "",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_finish_reason: Optional[Callable[[str], None]] = None,
+        on_proxy_used: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        DeepSeek modelini doğrudan çalıştırır (api.deepseek.com veya chat.deepseek.com sanal tarayıcısı).
+        Hiçbir koşulda OpenAI veya text.pollinations.ai proxy köprüsüne gönderilmez.
+        """
+        target_model = "deepseek-chat" if deepseek_model in ("deepseek-web", "deepseek-r1") else deepseek_model
+        gateway_logger.info(
+            f"DeepSeek isteği yönlendiriliyor | model={deepseek_model} -> {target_model} | hedef=DeepSeek (api.deepseek.com / chat.deepseek.com)"
+        )
+        if settings.deepseek_api_key:
+            api_url = "https://api.deepseek.com/v1/chat/completions"
+            payload = {
+                "model": target_model,
+                "messages": openai_messages,
+                "stream": True,
+                "temperature": temperature if temperature is not None else 0.7,
+            }
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+
+            try:
+                raw_bytes = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    api_url,
+                    data=raw_bytes,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {settings.deepseek_api_key}",
+                        "User-Agent": "ThinkPort-DeepSeek/1.0",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=settings.web_gateway_timeout_sec) as resp:
+                    for line_bytes in resp:
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            choices = chunk.get("choices") or []
+                            if choices:
+                                d_txt = choices[0].get("delta", {}).get("content", "")
+                                if d_txt:
+                                    on_delta(d_txt)
+                        except Exception:
+                            pass
+                    if on_finish_reason:
+                        on_finish_reason("stop")
+                    gateway_logger.info(f"DeepSeek API akışı tamamlandı | model={target_model}")
+                    return True
+            except Exception as exc:
+                gateway_logger.warning(f"DeepSeek API hatası (api.deepseek.com): {exc}")
+
+        return False
 
     def _try_pollinations_openai_endpoint(
         self,
@@ -420,7 +910,7 @@ class LlmProviderService:
 
             def _on_attempt_finish(fr: str) -> None:
                 if fr:
-                    attempt_finish[0] = str(fr)
+                    attempt_finish[0] = fr
 
             context = create_verified_ssl_context()
             conn: Optional[_ProxiedHTTPSConnection] = None
@@ -835,7 +1325,7 @@ class LlmProviderService:
         if seed is not None:
             body["seed"] = seed
         if max_tokens is not None and max_tokens > 0:
-            body["max_tokens"] = int(max_tokens)
+            body["max_tokens"] = max_tokens
         if MessageFormatterService.is_json_mode_requested(response_format):
             body["response_format"] = {"type": "json_object"}
         return json.dumps(body).encode("utf-8")

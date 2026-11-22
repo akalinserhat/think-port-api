@@ -13,7 +13,6 @@ import { SettingsView } from './components/SettingsView';
 import { LoginView } from './components/LoginView';
 import {
   BrowserSessionsPage,
-  BrowserSessionsPageSettingsForExternal,
   BrowserProvider,
   RestBrowserServiceAdapter,
 } from '@akalin/browser_module';
@@ -190,6 +189,8 @@ export const App: React.FC = () => {
       navigate('/chat', { replace: true });
     } else if (clean.startsWith('/nodes/sessions')) {
       navigate('/browser/sessions', { replace: true });
+    } else if (clean.startsWith('/browser/settings')) {
+      navigate('/settings/browser-settings', { replace: true });
     }
   }, [location.pathname, navigate]);
 
@@ -647,11 +648,7 @@ export const App: React.FC = () => {
 
           {activeTab === 'browser' && (
             <BrowserProvider adapter={browserAdapter}>
-              {location.pathname.includes('/browser/settings') ? (
-                <BrowserSessionsPageSettingsForExternal />
-              ) : (
-                <BrowserSessionsPage />
-              )}
+              <BrowserSessionsPage />
             </BrowserProvider>
           )}
 

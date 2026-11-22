@@ -23,6 +23,8 @@ export class Gemma4LocalModel extends BaseThinkPortModel {
     'Sisteminizde kurulu gerçek yerel yapay zeka modeli (GEMMA4, 9.0 GB). Çok modlu (Vision) ve Türkçe muhakeme desteği.';
   readonly sourceFile = 'src/models/definitions/Gemma4LocalModel.ts';
   override readonly isLocal = true;
+  override readonly hostingApp = 'Ollama (Port 11434)';
+  override readonly accessType = 'Yerel LLM (Ollama Motoru)';
   override readonly contextWindow = 128000;
   override readonly maxOutputTokens = 8192;
 
