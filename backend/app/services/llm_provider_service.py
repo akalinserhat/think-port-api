@@ -19,12 +19,18 @@ from app.models.registry import model_registry
 from app.models.web_browser_model import IWebBrowserModel
 from app.repositories.proxy_repository import proxy_module_db
 from app.services.message_formatter_service import MessageFormatterService
+from app.services.web_browser_agent_bridge import (
+    build_browser_prompt,
+    parse_tool_calls_from_text,
+)
 
 # Her çıkış IP'si / proxy uç noktası için bağımsız eşzamanlılık kilidi (farklı IP'ler %100 paralel çalışır)
 _PROXY_SLOT_REGISTRY_LOCK = threading.Lock()
 _ENDPOINT_LOCKS: Dict[str, threading.Lock] = {}
 _IN_FLIGHT_ENDPOINTS: Set[str] = set()
 _LANE_CURSOR: List[int] = [0]
+_ACTIVE_BROWSER_SESSIONS_LOCK = threading.Lock()
+_ACTIVE_BROWSER_SESSIONS: Set[str] = set()
 
 _ROTATING_USER_AGENTS: Tuple[str, ...] = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -337,32 +343,39 @@ class LlmProviderService:
         on_delta: Callable[[str], None],
         requested_model_id: str = "",
         conversation_id: str = "",
+        response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         max_tokens: Optional[int] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
-        Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır.
+        Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır (agentik tool-calling destekli).
         1. GEMINI_API_KEY tanımlıysa Google Generative Language REST API (generativelanguage.googleapis.com) üzerinden SSE akışı yapar.
         2. API anahtarı yoksa @akalin/browser_module (port 8002) üzerinden https://gemini.google.com/app sanal tarayıcısına bağlanır.
         Hiçbir koşulda OpenAI veya text.pollinations.ai proxy köprüsüne gönderilmez.
         """
         target_model = "gemini-2.0-flash" if gemini_model in ("gemini-web", "gemini") else gemini_model
         gateway_logger.info(
-            f"Google Gemini isteği yönlendiriliyor | model={gemini_model} -> {target_model} | hedef=Google (gemini.google.com / Google API)"
+            f"Google Gemini isteği yönlendiriliyor | model={gemini_model} -> {target_model} | tools={len(tools or [])} | hedef=Google (gemini.google.com / Google API)"
         )
 
         # 1. Google Generative Language API ile doğrudan SSE akışı
         if settings.gemini_api_key:
             api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:streamGenerateContent?key={settings.gemini_api_key}&alt=sse"
+            effective_msgs = self._flatten_tool_messages_for_web(openai_messages) if any(
+                m.get("role") == "tool" or bool(m.get("tool_calls")) for m in openai_messages
+            ) else openai_messages
             contents = []
             system_instruction = None
-            for msg in openai_messages:
+            for msg in effective_msgs:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
-                if role == "system":
+                if role in ("system", "developer"):
                     system_instruction = {"parts": [{"text": str(content)}]}
                 else:
                     g_role = "model" if role == "assistant" else "user"
@@ -377,6 +390,25 @@ class LlmProviderService:
             }
             if system_instruction:
                 payload["systemInstruction"] = system_instruction
+            if tools:
+                fn_decls: List[Dict[str, Any]] = []
+                for t in tools:
+                    if not isinstance(t, dict):
+                        continue
+                    fn = t.get("function") if isinstance(t.get("function"), dict) else t
+                    fn_name = str(fn.get("name") or "").strip()
+                    if not fn_name:
+                        continue
+                    decl: Dict[str, Any] = {
+                        "name": fn_name,
+                        "description": str(fn.get("description") or ""),
+                    }
+                    params = fn.get("parameters")
+                    if isinstance(params, dict) and params.get("properties"):
+                        decl["parameters"] = params
+                    fn_decls.append(decl)
+                if fn_decls:
+                    payload["tools"] = [{"functionDeclarations": fn_decls}]
 
             try:
                 raw_bytes = json.dumps(payload).encode("utf-8")
@@ -386,6 +418,7 @@ class LlmProviderService:
                     headers={"Content-Type": "application/json", "User-Agent": "ThinkPort-Gemini/1.0"},
                     method="POST",
                 )
+                collected_tool_calls: List[Dict[str, Any]] = []
                 with urllib.request.urlopen(req, timeout=settings.web_gateway_timeout_sec) as resp:
                     for line_bytes in resp:
                         line = line_bytes.decode("utf-8", errors="replace").strip()
@@ -403,12 +436,26 @@ class LlmProviderService:
                                     txt = p.get("text", "")
                                     if txt:
                                         on_delta(txt)
+                                    fc = p.get("functionCall")
+                                    if isinstance(fc, dict) and fc.get("name"):
+                                        collected_tool_calls.append(
+                                            {
+                                                "id": f"call_gemini_{int(time.time() * 1000)}_{len(collected_tool_calls)}",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": str(fc["name"]),
+                                                    "arguments": json.dumps(fc.get("args") or {}, ensure_ascii=False),
+                                                },
+                                            }
+                                        )
                         except Exception:
                             pass
+                    if collected_tool_calls and on_tool_calls:
+                        on_tool_calls(collected_tool_calls)
                     if on_finish_reason:
-                        on_finish_reason("stop")
+                        on_finish_reason("tool_calls" if collected_tool_calls else "stop")
                     gateway_logger.info(
-                        f"Google Gemini REST API akışı tamamlandı | model={target_model} | upstream=generativelanguage.googleapis.com"
+                        f"Google Gemini REST API akışı tamamlandı | model={target_model} | tool_calls={len(collected_tool_calls)} | upstream=generativelanguage.googleapis.com"
                     )
                     return True
             except Exception as exc:
@@ -424,6 +471,10 @@ class LlmProviderService:
                 openai_messages=openai_messages,
                 on_delta=on_delta,
                 conversation_id=conversation_id,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                on_tool_calls=on_tool_calls,
                 on_finish_reason=on_finish_reason,
                 on_proxy_used=on_proxy_used,
                 on_reasoning=on_reasoning,
@@ -437,6 +488,10 @@ class LlmProviderService:
         openai_messages: List[Dict[str, Any]],
         on_delta: Callable[[str], None],
         conversation_id: str = "",
+        response_format: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
         on_reasoning: Optional[Callable[[str], None]] = None,
@@ -446,6 +501,9 @@ class LlmProviderService:
         IWebBrowserModel arayüzünü uygulayan herhangi bir sanal tarayıcı modelini
         (GeminiWebModel -> https://gemini.google.com/app, ChatGptWebModel -> https://chatgpt.com/ vb.)
         @akalin/browser_module (Docker Playwright) üzerinden ortak sözleşmeyle çalıştırır.
+        Agentik modda (`tools` veya `json_mode`) `system` prompt, araç şemaları ve `tool` sonuçlarını
+        prompt-tabanlı `<tool_call>` protokolü ile gönderir ve dönen araç çağrılarını OpenAI
+        `tool_calls` formatına ayrıştırarak `on_tool_calls` geri çağırımını tetikler.
         Proxy/bağlantı hatasında hata mesajı göstermeden arka arkaya `max_retries` (varsayılan 5)
         kez yeni proxy IP'si ile tekrar dener ve ilerlemeyi `on_reasoning` üzerinden `x/5` biçiminde bildirir.
         """
@@ -453,11 +511,8 @@ class LlmProviderService:
             from app.services.browser_tool_service import browser_tool_service
 
             target_url = web_browser_model.target_url
-            user_prompt = ""
-            for m in reversed(openai_messages):
-                if m.get("role") == "user":
-                    user_prompt = str(m.get("content", ""))
-                    break
+            is_json_mode = MessageFormatterService.is_json_mode_requested(response_format)
+            is_agentic_mode = bool(tools) or is_json_mode
 
             conv_id = conversation_id or f"{web_browser_model.session_prefix}-{int(time.time()) // 3600}"
             total_attempts = max(1, max_retries)
@@ -465,10 +520,26 @@ class LlmProviderService:
             next_proxy_override: Optional[Dict[str, Any]] = None
             parsed_res: Optional[Dict[str, Any]] = None
 
+            with _ACTIVE_BROWSER_SESSIONS_LOCK:
+                session_was_active = conv_id in _ACTIVE_BROWSER_SESSIONS
+
             for attempt in range(1, total_attempts + 1):
+                # Proxy retry durumunda önceki sekme kapatıldığı için tam bağlamı yeniden enjekte et
+                use_active_session = session_was_active and attempt == 1
+                user_prompt = build_browser_prompt(
+                    openai_messages=openai_messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    is_json_mode=is_json_mode,
+                    has_active_session=use_active_session,
+                )
+
                 if on_reasoning:
                     if attempt == 1:
-                        on_reasoning(f"🌐 {web_browser_model.name} bağlantısı kuruluyor ({attempt}/{total_attempts})...\n")
+                        mode_suffix = f" [Agentik | {len(tools)} araç]" if tools else ""
+                        on_reasoning(
+                            f"🌐 {web_browser_model.name}{mode_suffix} bağlantısı kuruluyor ({attempt}/{total_attempts})...\n"
+                        )
                     else:
                         on_reasoning(f"🔄 Yeni proxy IP'si ile yeniden deneniyor ({attempt}/{total_attempts})...\n")
 
@@ -490,7 +561,12 @@ class LlmProviderService:
                 candidate = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
                 if isinstance(candidate, dict) and not candidate.get("error"):
                     parsed_res = candidate
+                    with _ACTIVE_BROWSER_SESSIONS_LOCK:
+                        _ACTIVE_BROWSER_SESSIONS.add(conv_id)
                     break
+
+                with _ACTIVE_BROWSER_SESSIONS_LOCK:
+                    _ACTIVE_BROWSER_SESSIONS.discard(conv_id)
 
                 err_msg = (
                     str(candidate.get("error"))
@@ -541,7 +617,7 @@ class LlmProviderService:
                 route_label += f" -> {primary_ip}"
 
             gateway_logger.info(
-                f"{web_browser_model.name} Sanal Tarayıcı akışı tamamlandı: {resolved_url} | IP={primary_ip} | süre={latency}ms"
+                f"{web_browser_model.name} Sanal Tarayıcı akışı tamamlandı: {resolved_url} | IP={primary_ip} | süre={latency}ms | agentic={is_agentic_mode}"
             )
             if on_proxy_used:
                 on_proxy_used(route_label)
@@ -562,8 +638,38 @@ class LlmProviderService:
                     "requires_auth": bool(parsed_res.get("requires_auth")),
                     "primary_ip": primary_ip,
                     "inspection": inspection,
+                    "raw_mode": is_agentic_mode,
                 },
             )
+
+            # Agentik Mod: araç çağrısı (<tool_call> / JSON) ayrıştırması ve temiz çıktı aktarımı
+            effective_text = custom_formatted if custom_formatted is not None else clean_text
+            if tools and effective_text and not parsed_res.get("requires_auth"):
+                parsed_tool_calls, remaining_text = parse_tool_calls_from_text(
+                    effective_text,
+                    tools=tools,
+                )
+                if parsed_tool_calls and on_tool_calls:
+                    gateway_logger.info(
+                        f"{web_browser_model.name} agentik araç çağrısı ayrıştırıldı: "
+                        f"{[tc['function']['name'] for tc in parsed_tool_calls]}"
+                    )
+                    if remaining_text:
+                        for chunk in remaining_text.splitlines(keepends=True):
+                            on_delta(chunk)
+                    on_tool_calls(parsed_tool_calls)
+                    if on_finish_reason:
+                        on_finish_reason("tool_calls")
+                    return True
+
+            if is_agentic_mode and not parsed_res.get("requires_auth"):
+                final_agentic_text = effective_text or model_text
+                for chunk in final_agentic_text.splitlines(keepends=True):
+                    on_delta(chunk)
+                if on_finish_reason:
+                    on_finish_reason("stop")
+                return True
+
             if custom_formatted is not None:
                 for chunk in custom_formatted.splitlines(keepends=True):
                     on_delta(chunk)
@@ -571,27 +677,27 @@ class LlmProviderService:
                     on_finish_reason("stop")
                 return True
 
-            # Kullanıcıya şeffaf telemetri ve tespit edilen uç noktalar
-            browser_reply_parts = [
+            # Kullanıcıya şeffaf telemetri ve tespit edilen uç noktalar (varsayılan gizli, tıklanınca açılır)
+            telemetry_parts = [
                 f"🌐 **Model Sağlayıcısı:** {web_browser_model.vendor} (`{web_browser_model.id}` / {web_browser_model.name})\n",
                 f"🖥️ **Sanal Tarayıcı Motoru:** Docker Playwright Chromium (`akalin-virtual-browser:8002`)\n",
                 f"🎯 **Hedef URL:** [{resolved_url}]({resolved_url}) (Başlık: `{title}`)\n",
             ]
 
             if primary_ip:
-                browser_reply_parts.append(
+                telemetry_parts.append(
                     f"📡 **Bağlanılan Sunucu IP:** `{primary_ip}` ({web_browser_model.vendor})\n"
                 )
 
             if api_endpoints:
-                browser_reply_parts.append(
+                telemetry_parts.append(
                     f"\n🔍 **Tespit Edilen API Uç Noktaları (Son {min(len(api_endpoints), 3)}):**\n"
                 )
                 for ep in api_endpoints[:3]:
                     ep_url = ep.get("base_url") or ep.get("url", "")
                     ep_ip = ep.get("ip_address") or primary_ip or "-"
                     ep_status = ep.get("status") or 200
-                    browser_reply_parts.append(
+                    telemetry_parts.append(
                         f"- `{ep_url}` | **IP:** `{ep_ip}` | **Durum:** `{ep_status}`\n"
                     )
 
@@ -606,11 +712,14 @@ class LlmProviderService:
                 dynamic_details.append(f"Aktif Çerezler: `{inspection.get('cookies_count')} adet`")
 
             if dynamic_details:
-                browser_reply_parts.append("\n🛡️ **Dinamik Tarayıcı Güvenlik Kontrolleri:**\n")
+                telemetry_parts.append("\n🛡️ **Dinamik Tarayıcı Güvenlik Kontrolleri:**\n")
                 for dt in dynamic_details:
-                    browser_reply_parts.append(f"- {dt}\n")
+                    telemetry_parts.append(f"- {dt}\n")
 
-            browser_reply_parts.append("\n---\n\n")
+            telemetry_block = "".join(telemetry_parts).strip()
+            browser_reply_parts = [
+                f":::details Teknik Bilgiler & Bağlantı Detayları\n{telemetry_block}\n:::\n\n"
+            ]
 
             if parsed_res.get("requires_auth"):
                 browser_reply_parts.append(
@@ -641,8 +750,13 @@ class LlmProviderService:
         openai_messages: List[Dict[str, Any]],
         on_delta: Callable[[str], None],
         conversation_id: str = "",
+        response_format: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+        on_tool_calls: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
+        on_reasoning: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
         ChatGptWebModel (IWebBrowserModel) üzerinden https://chatgpt.com/ sanal tarayıcısına bağlanır.
@@ -654,8 +768,13 @@ class LlmProviderService:
                 openai_messages=openai_messages,
                 on_delta=on_delta,
                 conversation_id=conversation_id,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                on_tool_calls=on_tool_calls,
                 on_finish_reason=on_finish_reason,
                 on_proxy_used=on_proxy_used,
+                on_reasoning=on_reasoning,
             )
         return False
 

@@ -2172,6 +2172,8 @@ class ChatService:
                         conversation_id=job.conversation_id,
                         response_format=job.response_format,
                         temperature=job.temperature,
+                        tools=job.tools,
+                        tool_choice=job.tool_choice,
                         max_tokens=job.max_tokens,
                         on_finish_reason=_on_provider_finish_reason,
                         on_proxy_used=_on_proxy_used,
@@ -2223,6 +2225,8 @@ class ChatService:
                         conversation_id=job.conversation_id,
                         response_format=job.response_format,
                         temperature=job.temperature,
+                        tools=job.tools,
+                        tool_choice=job.tool_choice,
                         max_tokens=job.max_tokens,
                         on_finish_reason=_on_provider_finish_reason,
                         on_proxy_used=_on_proxy_used,
@@ -2399,12 +2403,15 @@ class ChatService:
         conversation_id: str = "",
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır."""
+        """Google Gemini modelini doğrudan ve şeffaf biçimde çalıştırır (agentik tool-calling destekli)."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
         success = await asyncio.to_thread(
             self._llm_provider.stream_from_gemini,
@@ -2413,7 +2420,11 @@ class ChatService:
             delta_cb,
             requested_model_id=web_def.id,
             conversation_id=conversation_id,
+            response_format=response_format,
             temperature=temperature,
+            tools=tools,
+            tool_choice=tool_choice,
+            on_tool_calls=tools_cb,
             max_tokens=max_tokens,
             on_finish_reason=on_finish_reason,
             on_proxy_used=on_proxy_used,
@@ -2438,12 +2449,15 @@ class ChatService:
         conversation_id: str = "",
         response_format: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         max_tokens: Optional[int] = None,
         on_finish_reason: Optional[Callable[[str], None]] = None,
         on_proxy_used: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """IWebBrowserModel arayüzünü uygulayan sanal tarayıcı modelini çalıştırır (örn. chatgpt-web). Başarısız olursa başka modele geçmez."""
+        """IWebBrowserModel arayüzünü uygulayan sanal tarayıcı modelini çalıştırır (örn. chatgpt-web). Agentik tool-calling destekler; başarısız olursa başka modele geçmez."""
         delta_cb = self._create_threadsafe_delta_callback(loop, channel, session_id)
+        tools_cb = self._create_threadsafe_tool_calls_callback(loop, channel, session_id)
         reasoning_cb = self._create_threadsafe_reasoning_callback(loop, channel, session_id)
         success = await asyncio.to_thread(
             self._llm_provider.stream_from_web_browser_model,
@@ -2451,6 +2465,10 @@ class ChatService:
             prepared.multimodal_messages,
             delta_cb,
             conversation_id=conversation_id,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            on_tool_calls=tools_cb,
             on_finish_reason=on_finish_reason,
             on_proxy_used=on_proxy_used,
             on_reasoning=reasoning_cb,

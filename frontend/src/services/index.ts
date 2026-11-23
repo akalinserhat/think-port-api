@@ -3,7 +3,6 @@ export * from './adminService';
 export * from './userService';
 export * from './systemUserService';
 export * from './apiKeyService';
-export * from './proxyService';
 export * from './fileParserService';
 export * from './chatService';
 export * from './conversationService';

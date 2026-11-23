@@ -1,28 +1,21 @@
 import React, { useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  Activity,
   MessageSquareCode,
   LayoutDashboard,
   Users,
   KeyRound,
-  ServerCog,
   SlidersHorizontal,
   Sparkles,
-  Activity,
-  MonitorCheck,
-  Globe,
   Compass,
 } from 'lucide-react';
 import { Sidebar, type SidebarItem } from '@akalin/ui';
 import { ActiveTab, AdminStateResponseDTO } from '../dtos';
 
-export type NodesSubSection = 'dashboard' | 'sessions' | 'proxies';
-
 interface NavigationDrawerProps {
   activeTab: ActiveTab;
-  nodesSubSection?: NodesSubSection;
   onSelectTab: (tab: ActiveTab) => void;
-  onSelectNodesSubSection?: (sub: NodesSubSection) => void;
   state: AdminStateResponseDTO;
   isGenerating: boolean;
   isCollapsed?: boolean;
@@ -31,9 +24,7 @@ interface NavigationDrawerProps {
 
 export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   activeTab,
-  nodesSubSection = 'dashboard',
   onSelectTab,
-  onSelectNodesSubSection,
   state,
   isGenerating,
   isCollapsed = false,
@@ -44,7 +35,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
   const idleSessions = state.browser_sessions.filter((s) => s.status === 'idle').length;
   const busyAny = isGenerating || idleSessions < state.browser_sessions.length;
   const activeKeyCount = state.api_keys.filter((k) => k.is_active).length;
-  const activeProxyCount = state.proxies.filter((p) => p.status === 'active').length;
 
   const sidebarItems: SidebarItem[] = useMemo(
     () => [
@@ -98,40 +88,6 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
         },
       },
       {
-        id: 'nodes',
-        label: t('nav.nodes'),
-        path: '/nodes',
-        icon: <ServerCog size={20} />,
-        onClick: (_item, e) => {
-          e.preventDefault();
-          if (onSelectNodesSubSection) {
-            onSelectNodesSubSection('dashboard');
-          } else {
-            onSelectTab('nodes');
-          }
-        },
-        children: [
-          {
-            id: 'nodes-proxies',
-            label: t('nav.nodesProxies', 'Proxy Listesi'),
-            path: '/nodes/proxies',
-            icon: <Globe size={17} />,
-            badge: {
-              text: `${activeProxyCount}/${state.proxies.length}`,
-              variant: activeProxyCount > 0 ? 'info' : 'secondary',
-            },
-            onClick: (_item, e) => {
-              e.preventDefault();
-              if (onSelectNodesSubSection) {
-                onSelectNodesSubSection('proxies');
-              } else {
-                onSelectTab('nodes');
-              }
-            },
-          },
-        ],
-      },
-      {
         id: 'browser',
         label: t('nav.browser', 'Sanal Tarayıcı'),
         path: '/browser/sessions',
@@ -157,29 +113,18 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
       state.models.length,
       state.users.length,
       activeKeyCount,
-      idleSessions,
-      state.browser_sessions.length,
-      activeProxyCount,
-      state.proxies.length,
       onSelectTab,
-      onSelectNodesSubSection,
     ]
   );
 
   const handleIsItemActive = useCallback(
     (item: SidebarItem) => {
-      if (item.id === 'nodes-proxies') {
-        return activeTab === 'nodes' && nodesSubSection === 'proxies';
-      }
-      if (item.id === 'nodes') {
-        return activeTab === 'nodes' && nodesSubSection === 'dashboard';
-      }
       if (item.id === 'browser') {
         return activeTab === 'browser';
       }
       return item.id === activeTab;
     },
-    [activeTab, nodesSubSection]
+    [activeTab]
   );
 
   const headerSlot = !isCollapsed ? (

@@ -256,4 +256,7 @@ class ChatGptWebModel(BaseWebBrowserModel):
         if not cleaned:
             return None
 
+        if metadata.get("raw_mode"):
+            return cleaned
+
         return self._format_as_readable_markdown(cleaned)

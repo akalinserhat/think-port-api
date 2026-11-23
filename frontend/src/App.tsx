@@ -2,13 +2,12 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { NavigationDrawer, type NodesSubSection } from './components/NavigationDrawer';
+import { NavigationDrawer } from './components/NavigationDrawer';
 import { TopAppBar } from './components/TopAppBar';
 import { ChatStudioView } from './components/ChatStudioView';
 import { OverviewView } from './components/OverviewView';
 import { UsersView } from './components/UsersView';
 import { ApiKeysView } from './components/ApiKeysView';
-import { NodesPoolView } from './components/NodesPoolView';
 import { SettingsView } from './components/SettingsView';
 import { LoginView } from './components/LoginView';
 import {
@@ -20,8 +19,6 @@ import {
   ActiveTab,
   AdminStateResponseDTO,
   ApiKeyRecordDTO,
-  BrowserSessionDTO,
-  CreateBrowserSessionRequestDTO,
   GatewaySettingsDTO,
   SystemUserRecordDTO,
 } from './dtos';
@@ -29,7 +26,6 @@ import {
   adminService,
   apiKeyService,
   DEFAULT_SYSTEM_USER,
-  proxyService,
   systemUserService,
 } from './services';
 import { ModelRegistry } from './models';
@@ -41,7 +37,6 @@ const TAB_ROUTES: Record<ActiveTab, string> = {
   overview: '/overview',
   users: '/users',
   keys: '/keys',
-  nodes: '/nodes',
   browser: '/browser/sessions',
   settings: '/settings',
 };
@@ -51,9 +46,7 @@ function resolveTabFromPathname(pathname: string): ActiveTab {
   if (clean.startsWith('/overview')) return 'overview';
   if (clean.startsWith('/users')) return 'users';
   if (clean.startsWith('/keys')) return 'keys';
-  if (clean.startsWith('/nodes/sessions')) return 'browser';
   if (clean.startsWith('/browser')) return 'browser';
-  if (clean.startsWith('/nodes')) return 'nodes';
   if (clean.startsWith('/settings')) return 'settings';
   return 'chat';
 }
@@ -157,25 +150,9 @@ export const App: React.FC = () => {
     [location.pathname]
   );
 
-  const nodesSubSection = useMemo<NodesSubSection>(() => {
-    const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '') || '/';
-    if (clean.startsWith('/nodes/proxies')) return 'proxies';
-    return 'dashboard';
-  }, [location.pathname]);
-
   const handleSelectTab = useCallback(
     (tab: ActiveTab) => {
       const targetPath = TAB_ROUTES[tab] || '/chat';
-      if (location.pathname !== targetPath) {
-        navigate(targetPath);
-      }
-    },
-    [location.pathname, navigate]
-  );
-
-  const handleSelectNodesSubSection = useCallback(
-    (sub: NodesSubSection) => {
-      const targetPath = sub === 'dashboard' ? '/nodes' : `/nodes/${sub}`;
       if (location.pathname !== targetPath) {
         navigate(targetPath);
       }
@@ -187,8 +164,6 @@ export const App: React.FC = () => {
     const clean = location.pathname.replace(/^\/admin(?=\/|$)/, '') || '/';
     if (clean === '/' || location.pathname === '/admin') {
       navigate('/chat', { replace: true });
-    } else if (clean.startsWith('/nodes/sessions')) {
-      navigate('/browser/sessions', { replace: true });
     } else if (clean.startsWith('/browser/settings')) {
       navigate('/settings/browser-settings', { replace: true });
     }
@@ -398,112 +373,6 @@ export const App: React.FC = () => {
     showToast(t('keys.keyCopiedToast'));
   };
 
-  const handleToggleProxy = async (proxyId: string) => {
-    try {
-      await proxyService.toggleProxyStatus(proxyId);
-      showToast(t('nodes.proxyUpdatedToast'));
-      await refreshState();
-    } catch {
-      setAdminState((prev) => ({
-        ...prev,
-        proxies: prev.proxies.map((p) =>
-          p.id === proxyId
-            ? { ...p, status: p.status === 'active' ? 'cooldown' : 'active' }
-            : p
-        ),
-      }));
-      showToast(t('nodes.proxyUpdatedToast'));
-    }
-  };
-
-  const handleSpawnDynamicSession = async (req: CreateBrowserSessionRequestDTO) => {
-    try {
-      const created = await proxyService.spawnDynamicSession(req);
-      setAdminState((prev) => {
-        const exists = prev.browser_sessions.some((s) => s.id === created.id);
-        return {
-          ...prev,
-          browser_sessions: exists
-            ? prev.browser_sessions
-            : [...prev.browser_sessions, created],
-        };
-      });
-      showToast(`Dinamik tarayıcı oturumu başlatıldı (${created.id})`);
-      await refreshState();
-    } catch {
-      // Fallback if backend route is not yet reloaded
-      const shortId = Math.random().toString(16).slice(2, 6);
-      const prefix = (req.provider || 'chatgpt-web').split('-')[0];
-      const activeProxies = adminState.proxies.filter((p) => p.status === 'active');
-      const chosenProxy = req.proxy_id
-        ? adminState.proxies.find((p) => p.id === req.proxy_id)
-        : activeProxies.sort((a, b) => (a.latency_ms ?? 50) - (b.latency_ms ?? 50))[0];
-      const proxyLabel = chosenProxy
-        ? `${chosenProxy.endpoint} (${chosenProxy.country}-${(chosenProxy.proxy_type || 'Res').slice(0, 3)})`
-        : 'Direct / Residential Auto-Pool';
-      const nowIso = new Date().toISOString();
-      const fallbackSession: BrowserSessionDTO = {
-        id: `sess-${prefix}-dyn-${shortId}`,
-        provider: req.provider || 'chatgpt-web',
-        account: req.account?.trim() || `dyn_${prefix}_${shortId}@autoscale.pool`,
-        proxy: proxyLabel,
-        status: 'idle',
-        requests_served: 0,
-        is_dynamic: true,
-        created_at: nowIso,
-        last_active_at: nowIso,
-        idle_ttl_sec: req.idle_ttl_sec || 300,
-      };
-      setAdminState((prev) => ({
-        ...prev,
-        browser_sessions: [...prev.browser_sessions, fallbackSession],
-      }));
-      showToast(`Dinamik tarayıcı oturumu başlatıldı (${fallbackSession.id})`);
-    }
-  };
-
-  const handlePruneDynamicSessions = async () => {
-    try {
-      const res = await proxyService.pruneIdleDynamicSessions();
-      setAdminState((prev) => ({
-        ...prev,
-        browser_sessions: prev.browser_sessions.filter(
-          (s) => !(s.is_dynamic && s.status === 'idle')
-        ),
-      }));
-      showToast(`Boştaki dinamik oturumlar temizlendi (${res.removed_count} adet kapatıldı)`);
-      await refreshState();
-    } catch {
-      const idleDynamicCount = adminState.browser_sessions.filter(
-        (s) => s.is_dynamic && s.status === 'idle'
-      ).length;
-      setAdminState((prev) => ({
-        ...prev,
-        browser_sessions: prev.browser_sessions.filter(
-          (s) => !(s.is_dynamic && s.status === 'idle')
-        ),
-      }));
-      showToast(`Boştaki dinamik oturumlar temizlendi (${idleDynamicCount} adet kapatıldı)`);
-    }
-  };
-
-  const handleTerminateSession = async (sessionId: string) => {
-    try {
-      await proxyService.terminateSession(sessionId);
-      setAdminState((prev) => ({
-        ...prev,
-        browser_sessions: prev.browser_sessions.filter((s) => s.id !== sessionId),
-      }));
-      showToast(`Tarayıcı oturumu sonlandırıldı (${sessionId})`);
-    } catch {
-      setAdminState((prev) => ({
-        ...prev,
-        browser_sessions: prev.browser_sessions.filter((s) => s.id !== sessionId),
-      }));
-      showToast(`Tarayıcı oturumu sonlandırıldı (${sessionId})`);
-    }
-  };
-
   const handleSaveSettings = async (updated: GatewaySettingsDTO) => {
     try {
       await adminService.updateSettings(updated);
@@ -561,9 +430,7 @@ export const App: React.FC = () => {
     <div className={`app-container ${isSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <NavigationDrawer
         activeTab={activeTab}
-        nodesSubSection={nodesSubSection}
         onSelectTab={handleSelectTab}
-        onSelectNodesSubSection={handleSelectNodesSubSection}
         state={effectiveState}
         isGenerating={isGenerating}
         isCollapsed={isSidebarCollapsed}
@@ -626,23 +493,6 @@ export const App: React.FC = () => {
               onCreateKey={handleCreateApiKey}
               onRevokeKey={handleRevokeKey}
               onCopyAndUseKey={handleCopyAndUseKey}
-            />
-          )}
-
-          {activeTab === 'nodes' && (
-            <NodesPoolView
-              activeSection={nodesSubSection}
-              sessions={adminState.browser_sessions}
-              proxies={adminState.proxies}
-              poolDashboard={adminState.pool_dashboard}
-              maxConcurrentBrowsers={adminState.settings.max_concurrent_browsers}
-              onNavigateSection={handleSelectNodesSubSection}
-              onToggleProxy={handleToggleProxy}
-              onSpawnDynamicSession={handleSpawnDynamicSession}
-              onPruneDynamicSessions={handlePruneDynamicSessions}
-              onTerminateSession={handleTerminateSession}
-              onRefreshState={refreshState}
-              onShowToast={showToast}
             />
           )}
 

@@ -7,7 +7,6 @@ from app.services.image_service import ImageService
 from app.services.chat_service import ChatService
 from app.services.user_service import UserService
 from app.services.api_key_service import ApiKeyService
-from app.services.proxy_service import ProxyService
 from app.services.admin_service import AdminService
 
 __all__ = [
@@ -20,6 +19,5 @@ __all__ = [
     "ChatService",
     "UserService",
     "ApiKeyService",
-    "ProxyService",
     "AdminService",
 ]

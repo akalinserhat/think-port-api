@@ -13,7 +13,6 @@ import {
 } from '@akalin/email_module';
 import { createGlobalSearchModule } from '@akalin/global_search_module';
 import { createAuthModule } from '@akalin/user_auth_module';
-import { createProxyModule, createRestProxyAdapter } from '@akalin/proxy_module';
 import { createBrowserModule, RestBrowserServiceAdapter } from '@akalin/browser_module';
 
 let isInitialized = false;
@@ -69,28 +68,6 @@ export function initializeGatewayModules(): void {
   });
 
   ModuleRegistry.register(emailModule);
-
-  // 2.b) @akalin/proxy_module — Bağlantı Havuzu, Proxy & Dinamik Tarayıcı Oturumları Modülü
-  const proxyModule = createProxyModule({
-    id: 'proxy-module',
-    appName: 'ThinkPort API',
-    baseRoute: '/nodes',
-    settingsModuleId: 'proxies',
-    settingsModuleName: 'Bağlantı & Proxy Havuzu Ayarları',
-    settingsModuleDesc:
-      'Anti-Bot proxy düğümleri, ücretsiz proxy çekimi, gecikme testleri ve dinamik tarayıcı oturum havuzu yapılandırması',
-    settingsModuleBadge: 'Proxy & Auto-Scale',
-    settingsOrder: 50,
-    adapter: createRestProxyAdapter({
-      baseUrl: '/admin/proxies',
-      stateUrl: '/admin/state',
-    }),
-    onNotify: (msg, type) => {
-      if (type === 'error') toast.error(msg);
-      else toast.success(msg);
-    },
-  });
-  ModuleRegistry.register(proxyModule);
 
   // 2.c) @akalin/browser_module — Sanal Tarayıcı & AI Web Otomasyon Modülü
   const browserModule = createBrowserModule({

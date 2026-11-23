@@ -22,7 +22,6 @@ from app.services.image_service import ImageService
 from app.services.chat_service import ChatService
 from app.services.user_service import UserService
 from app.services.api_key_service import ApiKeyService
-from app.services.proxy_service import ProxyService
 from app.services.admin_service import AdminService
 from app.services.conversation_service import ConversationService
 
@@ -76,7 +75,6 @@ chat_service = ChatService(
 )
 user_service = UserService(user_repo=user_repository)
 api_key_service = ApiKeyService(api_key_repo=api_key_repository)
-proxy_service = ProxyService(proxy_repo=proxy_repository)
 conversation_service = ConversationService(
     conversation_repo=conversation_repository,
     api_key_repo=api_key_repository,
@@ -117,11 +115,6 @@ def get_user_service() -> UserService:
 def get_api_key_service() -> ApiKeyService:
     """ApiKeyService bağımlılık sağlayıcısı."""
     return api_key_service
-
-
-def get_proxy_service() -> ProxyService:
-    """ProxyService bağımlılık sağlayıcısı."""
-    return proxy_service
 
 
 def get_admin_service() -> AdminService:

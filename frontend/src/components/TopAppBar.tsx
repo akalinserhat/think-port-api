@@ -44,7 +44,6 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
     overview: t('nav.overview'),
     users: t('nav.users'),
     keys: t('nav.keys'),
-    nodes: t('nav.nodes'),
     browser: t('nav.browser', 'Sanal Tarayıcı'),
     settings: t('nav.settings'),
   };
