@@ -9,7 +9,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("browser_tool_service")
 
@@ -288,6 +288,75 @@ class BrowserToolService:
             return json.dumps({
                 "error": f"Sanal tarayıcı motoru yanıt vermedi ({exc}). Lütfen 'akalin-virtual-browser' Docker konteynerinin çalıştığından emin olun."
             }, ensure_ascii=False)
+
+    def stream_browser_prompt_llm(
+        self,
+        raw_arguments: Any,
+        conversation_id: str,
+        on_delta: Optional[Callable[[str], None]] = None,
+        app_id: str = "",
+        agent_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        akalin-browser-module `/api/browser/prompt-stream` SSE uç noktasına bağlanarak
+        DOM üzerindeki LLM yanıtını gerçek zamanlı (delta) akıtır ve final sonuç sözlüğünü döner.
+        """
+        args: Dict[str, Any] = raw_arguments if isinstance(raw_arguments, dict) else {}
+        payload: Dict[str, Any] = {
+            "action": "prompt_llm",
+            "conversation_id": conversation_id or "default-conv",
+            "app_id": app_id,
+            "agent_id": agent_id,
+            "url": args.get("url"),
+            "text": args.get("text"),
+            "use_proxy": bool(args.get("use_proxy", False)),
+        }
+        if args.get("proxy_override"):
+            payload["proxy_override"] = args["proxy_override"]
+        if args.get("exclude_proxy_ids"):
+            payload["exclude_proxy_ids"] = args["exclude_proxy_ids"]
+
+        api_url = f"{self.base_url}/api/browser/prompt-stream"
+        final_result: Optional[Dict[str, Any]] = None
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": "ThinkPortAPI/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=75.0) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        evt = json.loads(data_str)
+                    except Exception:
+                        continue
+                    etype = evt.get("event")
+                    if etype == "delta" and on_delta:
+                        chunk = str(evt.get("text") or "")
+                        if chunk:
+                            on_delta(chunk)
+                    elif etype == "done":
+                        res_obj = evt.get("result")
+                        if isinstance(res_obj, dict):
+                            final_result = res_obj
+                        break
+            return final_result or {"error": "Sanal tarayıcı akışı sonuç döndürmeden kapandı."}
+        except Exception as exc:
+            logger.warning(f"Browser akış motoruna bağlanılamadı ({api_url}): {exc}")
+            return {
+                "error": f"Sanal tarayıcı motoru yanıt vermedi ({exc}). Lütfen 'akalin-virtual-browser' Docker konteynerinin çalıştığından emin olun."
+            }
 
 
 browser_tool_service = BrowserToolService()

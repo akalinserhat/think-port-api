@@ -1,4 +1,5 @@
 @import './styles/index.css';
+@import './styles/ai-response-timer.css';
 
 /* Material Design 3 — Light Theme Tokens (Google AI Studio / Indigo-Violet Tonal Palette) */
 :root {

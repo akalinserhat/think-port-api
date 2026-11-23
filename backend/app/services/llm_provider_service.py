@@ -553,14 +553,28 @@ class LlmProviderService:
                 if exclude_proxy_ids:
                     tool_args["exclude_proxy_ids"] = list(exclude_proxy_ids)
 
-                raw_res = browser_tool_service.execute_browser_tool(
-                    tool_name="thinkport_browser_prompt_llm",
-                    raw_arguments=tool_args,
-                    conversation_id=conv_id,
-                )
-                candidate = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
+                streamed_live_chunks: List[str] = []
+                if not is_agentic_mode:
+                    def _live_delta_cb(chunk: str) -> None:
+                        streamed_live_chunks.append(chunk)
+                        on_delta(chunk)
+
+                    candidate: Any = browser_tool_service.stream_browser_prompt_llm(
+                        raw_arguments=tool_args,
+                        conversation_id=conv_id,
+                        on_delta=_live_delta_cb,
+                    )
+                else:
+                    raw_res = browser_tool_service.execute_browser_tool(
+                        tool_name="thinkport_browser_prompt_llm",
+                        raw_arguments=tool_args,
+                        conversation_id=conv_id,
+                    )
+                    candidate = json.loads(raw_res) if isinstance(raw_res, str) else raw_res
+
                 if isinstance(candidate, dict) and not candidate.get("error"):
                     parsed_res = candidate
+                    parsed_res["_already_streamed_live"] = bool(streamed_live_chunks)
                     with _ACTIVE_BROWSER_SESSIONS_LOCK:
                         _ACTIVE_BROWSER_SESSIONS.add(conv_id)
                     break
@@ -596,6 +610,8 @@ class LlmProviderService:
             if not parsed_res:
                 return False
 
+            already_streamed_live = bool(parsed_res.get("_already_streamed_live"))
+
             title = str(parsed_res.get("title") or web_browser_model.name)
             resolved_url = str(parsed_res.get("url") or target_url)
             model_text = str(parsed_res.get("text") or "").strip()
@@ -621,6 +637,12 @@ class LlmProviderService:
             )
             if on_proxy_used:
                 on_proxy_used(route_label)
+
+            # Eğer yanıt DOM üzerinden canlı (delta) olarak zaten akıtıldıysa tekrar basmadan bitir
+            if already_streamed_live:
+                if on_finish_reason:
+                    on_finish_reason("stop")
+                return True
 
             # Temizlenmiş model metni
             clean_text = model_text

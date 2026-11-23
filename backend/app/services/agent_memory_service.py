@@ -1123,7 +1123,14 @@ class AgentMemoryService:
             if ln.strip() and not ln.strip().startswith("```")
         ]
         if table_lines:
-            starts_with_meta = table_lines[0].startswith("#")
+            # Yalnızca CSV meta yorum satırları (# KEY=VALUE) kabul edilir; Markdown başlıkları (# Başlık, ##, ###) CSV değildir.
+            first_ln = table_lines[0]
+            starts_with_meta = (
+                first_ln.startswith("#")
+                and not first_ln.startswith("##")
+                and "=" in first_ln
+                and not first_ln.rstrip().endswith("?")
+            )
             semicolon_line_count = sum(1 for ln in table_lines if ";" in ln)
             header_line, expected_cols = cls.detect_csv_header_info(text)
             non_comment_lines = [ln for ln in table_lines if not ln.startswith("#")]
