@@ -3,12 +3,22 @@ ThinkPort AI Gateway - Google Gemini (Sanal Tarayıcı) Model Tanımı (gemini_w
 IWebBrowserModel (BaseWebBrowserModel) arayüzünü uygulayan bağımsız Gemini Web modeli.
 Hedef Web URL: https://gemini.google.com/app
 """
-from typing import List, Optional
+import re
+from typing import Any, Dict, List, Optional
+from app.models.base_model import ModelCapabilities
 from app.models.web_browser_model import BaseWebBrowserModel
 
 
 class GeminiWebModel(BaseWebBrowserModel):
     """Google Gemini Sanal Tarayıcı modeli (https://gemini.google.com/app)."""
+
+    _TRAILING_MARKERS: List[str] = [
+        "About Gemini",
+        "Gemini can make mistakes",
+        "Gemini hata yapabilir",
+        "Google Terms",
+        "Privacy Policy",
+    ]
 
     @property
     def id(self) -> str:
@@ -67,6 +77,14 @@ class GeminiWebModel(BaseWebBrowserModel):
         return "gemini-web"
 
     @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            vision=False,
+            supports_image_attachments=False,
+            supports_file_attachments=False,
+        )
+
+    @property
     def aliases(self) -> List[str]:
         return [
             "gemini-web",
@@ -75,3 +93,22 @@ class GeminiWebModel(BaseWebBrowserModel):
             "gemini-app",
             "gemini-browser",
         ]
+
+    def format_browser_response(
+        self,
+        raw_text: str,
+        metadata: Dict[str, Any],
+    ) -> Optional[str]:
+        """Gemini Web çıktısından arayüz kalıntılarını temizleyip okunabilir Markdown olarak sunar."""
+        text = (raw_text or "").replace("\r\n", "\n").strip()
+        if not text:
+            return None
+
+        text = re.sub(r"^(?:Gemini\s+said:?\s*)", "", text, flags=re.IGNORECASE).strip()
+        for marker in self._TRAILING_MARKERS:
+            pos = text.find(marker)
+            if pos != -1 and pos > 20:
+                text = text[:pos].rstrip()
+
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text or None

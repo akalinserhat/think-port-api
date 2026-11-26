@@ -2,7 +2,7 @@ import asyncio
 import json
 import threading
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 from app.dtos.admin_dto import UsageLogDTO, GatewaySettingsDTO
 from app.dtos.image_dto import CachedImageDTO
 from app.repositories.state_store import InMemoryStateStore
@@ -139,21 +139,27 @@ class UsageRepository:
                     log.request_id,
                     source,
                     log.model,
-                    int(log.prompt_tokens or 0),
-                    int(log.completion_tokens or 0),
-                    int(log.total_tokens or 0),
+                    log.prompt_tokens or 0,
+                    log.completion_tokens or 0,
+                    log.total_tokens or 0,
                     usage_date,
                     now_iso,
                 ),
             )
-            total_spent = conn.execute(
+            spent_row = conn.execute(
                 "SELECT COALESCE(SUM(total_tokens), 0) FROM user_token_usages WHERE user_id = ?",
                 (effective_uid,),
-            ).fetchone()[0]
+            ).fetchone()
+            total_spent = spent_row[0] if spent_row else 0
             conn.execute(
                 "UPDATE users SET tokens_used = ? WHERE id = ?",
                 (int(total_spent), effective_uid),
             )
+        try:
+            from app.repositories.user_repository import invalidate_user_cache
+            invalidate_user_cache(effective_uid)
+        except Exception:
+            pass
         return log
 
     def clear_logs(self) -> None:
@@ -246,13 +252,13 @@ class StreamChannelRepository:
     def __init__(self, state_store: InMemoryStateStore) -> None:
         self._store = state_store
 
-    def create_channel(self, job_id: str) -> asyncio.Queue:
+    def create_channel(self, job_id: str) -> asyncio.Queue[Any]:
         """Belirtilen iş ID'si için yeni bir asenkron kuyruk oluşturur."""
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
         self._store.stream_channels[job_id] = queue
         return queue
 
-    def get_channel(self, job_id: str) -> Optional[asyncio.Queue]:
+    def get_channel(self, job_id: str) -> Optional[asyncio.Queue[Any]]:
         """İş ID'sine ait asenkron kuyruğu döner."""
         return self._store.stream_channels.get(job_id)
 

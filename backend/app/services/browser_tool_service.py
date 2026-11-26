@@ -280,7 +280,7 @@ class BrowserToolService:
                 headers={"Content-Type": "application/json", "User-Agent": "ThinkPortAPI/1.0"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=75.0) as resp:
+            with urllib.request.urlopen(req, timeout=130.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return json.dumps(data, ensure_ascii=False)
         except Exception as exc:
@@ -294,6 +294,7 @@ class BrowserToolService:
         raw_arguments: Any,
         conversation_id: str,
         on_delta: Optional[Callable[[str], None]] = None,
+        on_status: Optional[Callable[[str, str], None]] = None,
         app_id: str = "",
         agent_id: str = "",
     ) -> Dict[str, Any]:
@@ -329,7 +330,7 @@ class BrowserToolService:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=75.0) as resp:
+            with urllib.request.urlopen(req, timeout=130.0) as resp:
                 for raw_line in resp:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
@@ -346,6 +347,11 @@ class BrowserToolService:
                         chunk = str(evt.get("text") or "")
                         if chunk:
                             on_delta(chunk)
+                    elif etype == "status" and on_status:
+                        stage = str(evt.get("stage") or "info")
+                        msg = str(evt.get("message") or "")
+                        if msg:
+                            on_status(stage, msg)
                     elif etype == "done":
                         res_obj = evt.get("result")
                         if isinstance(res_obj, dict):
@@ -357,6 +363,38 @@ class BrowserToolService:
             return {
                 "error": f"Sanal tarayıcı motoru yanıt vermedi ({exc}). Lütfen 'akalin-virtual-browser' Docker konteynerinin çalıştığından emin olun."
             }
+
+    def prewarm_target(
+        self,
+        target_url: str,
+        use_proxy: bool = True,
+        min_warm: int = 1,
+    ) -> Dict[str, Any]:
+        """Hedef model URL'si için sıcak tarayıcı sekmesi yoksa hızlıca arka planda ısıtma başlatır."""
+        if not target_url:
+            return {"status": "ignored", "warm_count": 0}
+        api_url = f"{self.base_url}/api/browser/prewarm"
+        payload = {
+            "url": target_url,
+            "use_proxy": use_proxy,
+            "min_warm": max(1, min_warm),
+        }
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "ThinkPortAPI/1.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw else {"status": "ok"}
+        except Exception as exc:
+            logger.debug(f"Prewarm isteği başarısız ({api_url}): {exc}")
+            return {"status": "error", "error": str(exc)}
 
 
 browser_tool_service = BrowserToolService()

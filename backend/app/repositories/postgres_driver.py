@@ -8,15 +8,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import os
+import queue
 import re
 import secrets
 import socket
 import struct
 import threading
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+import time
+from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple, TypeVar
 
 
 class PgRow:
@@ -139,13 +138,16 @@ class PgWireConnection:
         timeout: float = 30.0,
     ) -> None:
         self.host = host
-        self.port = int(port)
+        self.port = port
         self.user = user
         self.password = password
         self.database = database
         self.timeout = timeout
         self._sock: Optional[socket.socket] = None
         self._in_tx = False
+        self._broken = False
+        self._created_at = time.monotonic()
+        self._last_used_at = self._created_at
         self._connect()
 
     def _connect(self) -> None:
@@ -188,7 +190,6 @@ class PgWireConnection:
     def _read_msg(self) -> Tuple[str, bytes]:
         hdr = self._recv_exact(5)
         msg_type = chr(hdr[0])
-        length = struct.pack("!I", 0)  # dummy for type checker
         (msg_len,) = struct.unpack("!I", hdr[1:5])
         payload = self._recv_exact(msg_len - 4) if msg_len > 4 else b""
         return msg_type, payload
@@ -252,8 +253,8 @@ class PgWireConnection:
         client_first_msg = (gs2_header + client_first_bare).encode("utf-8")
 
         mech = b"SCRAM-SHA-256\x00"
-        initial_Payload = mech + struct.pack("!I", len(client_first_msg)) + client_first_msg
-        self._send_msg(b"p", initial_Payload)
+        initial_payload = mech + struct.pack("!I", len(client_first_msg)) + client_first_msg
+        self._send_msg(b"p", initial_payload)
 
         mtype, payload = self._read_msg()
         if mtype == "E":
@@ -308,7 +309,11 @@ class PgWireConnection:
     def execute_raw_sql(self, sql: str) -> PgCursorResult:
         """Basit sorgu protokolü ('Q') ile SQL çalıştırır ve tüm sonuçları okur."""
         query_bytes = sql.encode("utf-8") + b"\x00"
-        self._send_msg(b"Q", query_bytes)
+        try:
+            self._send_msg(b"Q", query_bytes)
+        except OSError:
+            self._broken = True
+            raise
 
         columns: List[str] = []
         col_oids: List[int] = []
@@ -317,7 +322,11 @@ class PgWireConnection:
         error_msg: Optional[str] = None
 
         while True:
-            mtype, payload = self._read_msg()
+            try:
+                mtype, payload = self._read_msg()
+            except OSError:
+                self._broken = True
+                raise
             if mtype == "T":
                 # RowDescription
                 (num_fields,) = struct.unpack("!H", payload[:2])
@@ -530,6 +539,28 @@ class PgWireConnection:
                 pass
             self._in_tx = False
 
+    @property
+    def last_used_at(self) -> float:
+        """Bağlantının havuzda son kullanıldığı monotonic zaman damgası."""
+        return self._last_used_at
+
+    def is_closed(self) -> bool:
+        """Bağlantının kapalı veya bozuk olup olmadığını döner."""
+        return self._sock is None or self._broken
+
+    def reset_for_pool(self) -> bool:
+        """Bağlantıyı havuza iade etmeden önce temiz (idle) duruma getirir."""
+        if self.is_closed():
+            return False
+        if self._in_tx:
+            try:
+                self.rollback()
+            except Exception:
+                self._broken = True
+                return False
+        self._last_used_at = time.monotonic()
+        return not self.is_closed()
+
     def close(self) -> None:
         if self._sock is not None:
             try:
@@ -541,4 +572,126 @@ class PgWireConnection:
             except Exception:
                 pass
             self._sock = None
+        self._in_tx = False
+
+
+class _PoolableConnection(Protocol):
+    """Bağlantı havuzu tarafından yönetilebilen soket/bağlantı sözleşmesi."""
+
+    @property
+    def last_used_at(self) -> float: ...
+
+    def is_closed(self) -> bool: ...
+
+    def reset_for_pool(self) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+TConn = TypeVar("TConn", bound=_PoolableConnection)
+
+
+class PgWireConnectionPool(Generic[TConn]):
+    """
+    Saf Python `PgWireConnection` için thread-safe, LIFO tabanlı PostgreSQL bağlantı havuzu.
+    Her sorguda yeni TCP + SCRAM-SHA-256 el sıkışması ve global kilit darboğazını ortadan kaldırır.
+    """
+
+    def __init__(
+        self,
+        factory: Callable[[], TConn],
+        min_size: int = 2,
+        max_size: int = 20,
+        max_idle_sec: float = 180.0,
+        acquire_timeout: float = 10.0,
+    ) -> None:
+        self._factory = factory
+        self._min_size = max(0, min_size)
+        self._max_size = max(1, max_size)
+        self._max_idle_sec = float(max_idle_sec)
+        self._acquire_timeout = float(acquire_timeout)
+        self._slots = threading.BoundedSemaphore(self._max_size)
+        self._idle: queue.LifoQueue[TConn] = queue.LifoQueue(maxsize=self._max_size)
+        self._closed = False
+        self._state_lock = threading.Lock()
+
+    def acquire(self) -> TConn:
+        """Havuzdan hazır bir bağlantı alır; yoksa limit dahilinde yeni bağlantı açar."""
+        if self._closed:
+            raise RuntimeError("PostgreSQL bağlantı havuzu kapatılmış.")
+
+        acquired = self._slots.acquire(timeout=self._acquire_timeout)
+        if not acquired:
+            raise TimeoutError(
+                f"PostgreSQL bağlantı havuzu dolu (max_size={self._max_size}, timeout={self._acquire_timeout}s)."
+            )
+
+        now = time.monotonic()
+        while True:
+            try:
+                conn = self._idle.get_nowait()
+            except queue.Empty:
+                break
+            if conn.is_closed() or (now - conn.last_used_at) > self._max_idle_sec:
+                conn.close()
+                continue
+            return conn
+
+        try:
+            return self._factory()
+        except Exception:
+            self._slots.release()
+            raise
+
+    def release(self, conn: Optional[TConn], broken: bool = False) -> None:
+        """Kullanılan bağlantıyı temizleyerek havuza iade eder veya bozuksa kapatır."""
+        try:
+            if conn is None:
+                return
+            if broken or self._closed or not conn.reset_for_pool():
+                conn.close()
+                return
+            try:
+                self._idle.put_nowait(conn)
+            except queue.Full:
+                conn.close()
+        finally:
+            self._slots.release()
+
+    def warm_up(self, count: Optional[int] = None) -> int:
+        """Başlangıçta belirtilen sayıda bağlantıyı önceden açıp havuza koyar."""
+        target = self._min_size if count is None else min(count, self._max_size)
+        opened: List[TConn] = []
+        created = 0
+        for _ in range(max(0, target - self._idle.qsize())):
+            try:
+                conn = self.acquire()
+                opened.append(conn)
+                created += 1
+            except Exception:
+                break
+        for conn in opened:
+            self.release(conn)
+        return created
+
+    def close_all(self) -> None:
+        """Havuzdaki tüm boşta bekleyen bağlantıları kapatır."""
+        with self._state_lock:
+            self._closed = True
+        while True:
+            try:
+                conn = self._idle.get_nowait()
+            except queue.Empty:
+                break
+            conn.close()
+
+    def stats(self) -> Dict[str, Any]:
+        """Havuzun anlık durum özetini döner."""
+        return {
+            "idle": self._idle.qsize(),
+            "min_size": self._min_size,
+            "max_size": self._max_size,
+            "closed": self._closed,
+        }
+
 

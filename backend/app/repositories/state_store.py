@@ -1,6 +1,7 @@
 import asyncio
+import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from app.core.security import hash_api_key
 
 
@@ -21,7 +22,63 @@ class InMemoryStateStore:
         self.settings: Dict[str, Any] = {}
         self.stream_channels: Dict[str, asyncio.Queue] = {}
         self.generated_images_cache: Dict[str, Dict[str, Any]] = {}
+        self.active_conversation_jobs: Dict[str, Dict[str, Any]] = {}
         self._initialize_seed_data()
+
+    def start_conversation_job(
+        self,
+        conversation_id: str,
+        job_id: str,
+        model: str,
+        provider: str = "",
+        source: str = "api",
+        status_text: str = "",
+    ) -> None:
+        """Aktif olarak işlenen API/Stüdyo sohbet işini bellek içi tabloya kaydeder."""
+        if not conversation_id:
+            return
+        self.active_conversation_jobs[conversation_id] = {
+            "job_id": job_id,
+            "model": model,
+            "provider": provider,
+            "source": "studio" if source == "studio" else "api",
+            "phase": "connect",
+            "status_text": status_text or f"{model} — Bağlantı kuruluyor...",
+            "content": "",
+            "thinking_content": "",
+            "char_length": 0,
+            "ttft_ms": 0,
+            "started_at": time.time(),
+        }
+
+    def update_conversation_job(
+        self,
+        conversation_id: str,
+        job_id: str,
+        **updates: Any,
+    ) -> None:
+        """Devam eden sohbet işinin anlık akış durumunu ve metnini günceller."""
+        if not conversation_id:
+            return
+        entry = self.active_conversation_jobs.get(conversation_id)
+        if not entry or entry.get("job_id") != job_id:
+            return
+        entry.update(updates)
+
+    def finish_conversation_job(self, conversation_id: str, job_id: str) -> None:
+        """Tamamlanan veya hata alan sohbet işini aktif tablodan kaldırır."""
+        if not conversation_id:
+            return
+        entry = self.active_conversation_jobs.get(conversation_id)
+        if entry and entry.get("job_id") == job_id:
+            self.active_conversation_jobs.pop(conversation_id, None)
+
+    def get_active_conversation_job(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Belirtilen oturumda halen devam eden iş varsa kopyasını döner."""
+        if not conversation_id:
+            return None
+        entry = self.active_conversation_jobs.get(conversation_id)
+        return dict(entry) if entry else None
 
     def _initialize_seed_data(self) -> None:
         """Tüm başlangıç verilerini sırasıyla yükler."""

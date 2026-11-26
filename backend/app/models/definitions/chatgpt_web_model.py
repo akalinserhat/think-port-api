@@ -5,6 +5,7 @@ Hedef Web URL: https://chatgpt.com/
 """
 import re
 from typing import Any, Dict, List, Optional
+from app.models.base_model import ModelCapabilities
 from app.models.web_browser_model import BaseWebBrowserModel
 
 
@@ -27,6 +28,7 @@ class ChatGptWebModel(BaseWebBrowserModel):
     ]
 
     _TRAILING_UI_MARKERS: List[str] = [
+        "ChatGPT is AI and can make mistakes",
         "ChatGPT can make mistakes",
         "ChatGPT hata yapabilir",
         "By messaging ChatGPT",
@@ -37,6 +39,9 @@ class ChatGptWebModel(BaseWebBrowserModel):
         "See plans and pricing",
         "Copy response",
         "Add files and more",
+        "Get responses tailored to you",
+        "Clear current chat?",
+        "New chatImagesShopping",
     ]
 
     @property
@@ -96,6 +101,14 @@ class ChatGptWebModel(BaseWebBrowserModel):
         return "chatgpt-web"
 
     @property
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            vision=True,
+            supports_image_attachments=True,
+            supports_file_attachments=False,
+        )
+
+    @property
     def aliases(self) -> List[str]:
         return [
             "chatgpt-web",
@@ -142,7 +155,10 @@ class ChatGptWebModel(BaseWebBrowserModel):
             if glue_match:
                 cleaned = cleaned[glue_match.end():].lstrip()
 
-        # 3. Alt bar / yasal uyarı kalıntılarını sondan kes
+        # 3. "Worked for 19s" benzeri düşünme süresi rozetlerini temizle
+        cleaned = re.sub(r"\s*(?:[-•]\s*)?Worked\s+for\s+\d+\s*[smh]\b", "", cleaned, flags=re.IGNORECASE)
+
+        # 4. Alt bar / yasal uyarı / yan menü kalıntılarını sondan kes
         for marker in cls._TRAILING_UI_MARKERS:
             pos = cleaned.find(marker)
             if pos != -1 and pos > 20:
@@ -153,81 +169,39 @@ class ChatGptWebModel(BaseWebBrowserModel):
     @staticmethod
     def _format_as_readable_markdown(text: str) -> str:
         """
-        DOM'dan tek blok halinde gelen ChatGPT metnini okunabilir başlıklar,
-        paragraflar ve madde işaretleri içeren kullanıcı dostu Markdown'a dönüştürür.
+        ChatGPT DOM çıktısını okunabilir Markdown'a dönüştürür.
+        Eğer çıktı DOM->Markdown motorundan zaten yapısal (tablo, başlık, liste, kod bloğu)
+        olarak geldiyse yapıyı bozmadan korur; yalnızca eski düz/yapışık metinlerde biçimlendirme uygular.
         """
         if not text:
             return text
 
         out = text.replace("\r\n", "\n").strip()
 
-        # 1. Numaralı bölüm başlıklarını yeni paragrafa ve kalın başlığa ayır:
-        # Örn: "...kazanabilir.1. Bakterinin temel özellikleri" -> "...kazanabilir.\n\n### 1. Bakterinin temel özellikleri"
-        out = re.sub(
-            r"(?<=[.!?a-zçğıöşü0-9])(\d+\.\s+[A-ZÇĞİÖŞÜ])",
-            r"\n\n### \1",
-            out,
+        # Zaten gerçek Markdown tablosu, kod bloğu veya çok satırlı başlık/liste yapısı varsa bozma
+        has_structured_md = (
+            "```" in out
+            or bool(re.search(r"\n\|\s*[-:]+", out))
+            or (out.count("\n") >= 4 and bool(re.search(r"(^|\n)(#{1,4}\s+|[-*]\s+|\d+\.\s+)", out)))
         )
+        if has_structured_md:
+            out = re.sub(r"[ \t]{2,}", " ", out)
+            out = re.sub(r"\n{3,}", "\n\n", out)
+            return out.strip()
 
-        # 2. Soru işaretiyle biten başlık/alt başlık geçişlerini paragraf yap:
-        # Örn: "Ewingella americana bakterisi nedir?Ewingella americana..."
-        out = re.sub(
-            r"\?(?=[A-ZÇĞİÖŞÜ])",
-            "?\n\n",
-            out,
-        )
+        # Eski düz/yapışık DOM metni fallback biçimlendirmesi (camelCase özel isimleri bölmeden!)
+        out = re.sub(r"([^\n\s])(\d{1,2}\.\s+[A-ZÇĞİÖŞÜ])", r"\1\n\2", out)
+        out = re.sub(r"\?(?=[A-ZÇĞİÖŞÜ])", "?\n\n", out)
+        out = re.sub(r":(?=[A-ZÇĞİÖŞÜ][^\n.:!?]{2,60}:)", ":\n\n- **", out)
+        out = re.sub(r"(^|\n)- \*\*([^\n:*]{2,60}):", r"\1- **\2:**", out)
+        out = re.sub(r"(?<=[.!])(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,})", "\n\n", out)
+        out = re.sub(r"(?<=[.:!?a-zçğıöşü])([\U0001F300-\U0001FAFF\u2600-\u27BF])", r"\n\n\1", out)
 
-        # 3. İki nokta üst üste sonrasında bitişik başlayan madde başlıklarını listeye dönüştür:
-        # Örn: "...neden olabilir:Kan dolaşımı enfeksiyonu (bakteriyemi): ..."
-        out = re.sub(
-            r":(?=[A-ZÇĞİÖŞÜ][^\n.:!?]{2,60}:)",
-            ":\n\n- **",
-            out,
-        )
-        # "- **Başlık:" kapanışını "**" ile kapat
-        out = re.sub(
-            r"(^|\n)- \*\*([^\n:*]{2,60}):",
-            r"\1- **\2:**",
-            out,
-        )
-
-        # 4. Nokta/ünlem sonrasında bitişik gelen "Başlık: Açıklama" maddelerini listeye ayır:
-        # Örn: "...oluşabilir.Yara enfeksiyonları: Özellikle..." -> "...oluşabilir.\n- **Yara enfeksiyonları:** Özellikle..."
-        out = re.sub(
-            r"(?<=[.!])([A-ZÇĞİÖŞÜ][^\n.:!?]{2,55}):(\s*)",
-            r"\n- **\1:** ",
-            out,
-        )
-
-        # 5. Emoji ile başlayan bitişik bölümleri yeni satıra ayır
-        out = re.sub(
-            r"(?<=[.:!?a-zçğıöşü])([\U0001F300-\U0001FAFF\u2600-\u27BF])",
-            r"\n\n\1",
-            out,
-        )
-
-        # 6. Nokta/ünlem sonrasında boşluksuz yapışan cümleleri ayır (kısaltma/ondalık sayıları koru)
-        out = re.sub(
-            r"(?<=[.!])(?=[A-ZÇĞİÖŞÜ])",
-            " ",
-            out,
-        )
-
-        # 7. Küçük harften hemen sonra büyük harfle yapışan tablo/özellik satırlarını ayır
-        # (Örn: "Gram-negatifBakteri şekli Çomak" -> "Gram-negatif\n- Bakteri şekli Çomak")
-        out = re.sub(
-            r"(?<=[a-zçğıöşü\)°C])(?=[A-ZÇĞİÖŞÜ][a-zçğıöşü]{2,})",
-            "\n- ",
-            out,
-        )
-
-        # 8. İlk satır soru başlığı ise belirginleştir (örn: "Ewingella americana bakterisi nedir?")
         lines = out.split("\n")
         if lines and lines[0].strip().endswith("?") and len(lines[0].strip()) <= 120 and not lines[0].startswith("#"):
             lines[0] = f"### {lines[0].strip()}"
         out = "\n".join(lines)
 
-        # Fazla boş satırları ve satır içi gereksiz boşlukları normalize et
         out = re.sub(r"[ \t]{2,}", " ", out)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()

@@ -128,6 +128,20 @@ export interface ConversationMessageRecordDTO {
   created_at: string;
 }
 
+export interface ActiveConversationJobDTO {
+  job_id: string;
+  model: string;
+  provider?: string;
+  source?: 'studio' | 'api';
+  phase: 'connect' | 'submitted' | 'streaming';
+  status_text?: string;
+  content?: string;
+  thinking_content?: string;
+  char_length?: number;
+  ttft_ms?: number;
+  started_at?: number;
+}
+
 export interface ConversationSummaryDTO {
   id: string;
   user_id: string;
@@ -144,6 +158,8 @@ export interface ConversationSummaryDTO {
   total_tokens: number;
   attachment_names: string[];
   last_message_preview: string;
+  is_processing?: boolean;
+  active_job?: ActiveConversationJobDTO | null;
   created_at: string;
   updated_at: string;
 }

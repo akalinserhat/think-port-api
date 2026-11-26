@@ -559,10 +559,15 @@ class LlmProviderService:
                         streamed_live_chunks.append(chunk)
                         on_delta(chunk)
 
+                    def _live_status_cb(_stage: str, msg: str) -> None:
+                        if on_reasoning and msg:
+                            on_reasoning(f"⚡ {msg}\n")
+
                     candidate: Any = browser_tool_service.stream_browser_prompt_llm(
                         raw_arguments=tool_args,
                         conversation_id=conv_id,
                         on_delta=_live_delta_cb,
+                        on_status=_live_status_cb,
                     )
                 else:
                     raw_res = browser_tool_service.execute_browser_tool(

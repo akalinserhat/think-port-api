@@ -12,6 +12,23 @@ import { extractHttpErrorMessage } from './httpClient';
  * Her metot yalnızca tek bir mesaj hazırlama veya akış işleme görevine sahiptir.
  */
 export const chatService = {
+  /** Web tabanlı bir model açıldığında sıcak tarayıcı sekmesi yoksa arka planda hızlıca hazırlar. */
+  async prewarmModel(modelId: string, apiKey?: string): Promise<void> {
+    if (!modelId) return;
+    try {
+      const headers: Record<string, string> = {};
+      if (apiKey && apiKey.trim()) {
+        headers.Authorization = `Bearer ${apiKey.trim()}`;
+      }
+      await fetch(`/v1/models/${encodeURIComponent(modelId)}/prewarm`, {
+        method: 'POST',
+        headers,
+      });
+    } catch {
+      // Arka plan ısıtması başarısız olursa sohbet akışını engelleme
+    }
+  },
+
   /** Tek bir mesajı OpenAI API (metin veya multimodal dizi) içerik formatına dönüştürür. */
   buildContentForMessage(
     msg: ChatMessageItemDTO,

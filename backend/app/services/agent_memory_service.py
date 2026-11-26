@@ -18,7 +18,14 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from app.core.logger import gateway_logger
+from app.core.ttl_cache import MISSING, TTLCache
 from app.repositories.postgres_db import postgres_db
+
+
+_AGENT_CONFIG_CACHE: TTLCache[Tuple[str, str], Dict[str, Any]] = TTLCache(
+    ttl_seconds=30.0,
+    max_items=256,
+)
 
 
 GATEWAY_MEMORY_TOOL_NAMES = {
@@ -85,6 +92,19 @@ class AgentMemoryService:
             vec[0] = 1.0
         return "[" + ",".join(str(v) for v in vec) + "]"
 
+    @staticmethod
+    def invalidate_agent_config_cache(
+        app_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> None:
+        """Ajan yapılandırma önbelleğini belirli bir (app_id, agent_id) veya tüm ajanlar için temizler."""
+        if app_id and agent_id:
+            norm_app, norm_agent = AgentMemoryService.normalize_identity(app_id, agent_id)
+            if norm_app and norm_agent:
+                _AGENT_CONFIG_CACHE.invalidate((norm_app, norm_agent))
+                return
+        _AGENT_CONFIG_CACHE.clear()
+
     def ensure_agent_registered_and_get_config(
         self,
         app_id: str,
@@ -111,6 +131,13 @@ class AgentMemoryService:
                 "secili_arac_kodlari": [],
                 "sistem_istemi": "",
             }
+
+        cache_key = (norm_app, norm_agent)
+        cached_cfg = _AGENT_CONFIG_CACHE.get_or_missing(cache_key)
+        if cached_cfg is not MISSING:
+            cfg_copy = dict(cached_cfg)
+            cfg_copy["secili_arac_kodlari"] = list(cached_cfg.get("secili_arac_kodlari") or [])
+            return cfg_copy
 
         with postgres_db.connection() as conn:
             row = conn.execute(
@@ -143,7 +170,7 @@ class AgentMemoryService:
             if not row:
                 # Harici uygulamada geliştirilmiş yeni ajan: otomatik kaydet
                 max_row = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM ai_agents").fetchone()
-                next_id = int(max_row["m"] or 0) + 1
+                next_id = int((max_row["m"] if max_row else 0) or 0) + 1
                 now_iso = datetime.now(timezone.utc).isoformat()
                 display_name = (agent_name or f"{norm_app} - {norm_agent}").strip()
                 default_tools = json.dumps(list(GATEWAY_MEMORY_TOOL_NAMES), ensure_ascii=False)
@@ -172,7 +199,7 @@ class AgentMemoryService:
                         now_iso,
                     ),
                 )
-                return {
+                created_cfg = {
                     "id": next_id,
                     "app_id": norm_app,
                     "agent_id": norm_agent,
@@ -185,6 +212,8 @@ class AgentMemoryService:
                     "secili_arac_kodlari": list(GATEWAY_MEMORY_TOOL_NAMES),
                     "sistem_istemi": "",
                 }
+                _AGENT_CONFIG_CACHE.set(cache_key, created_cfg)
+                return {**created_cfg, "secili_arac_kodlari": list(created_cfg["secili_arac_kodlari"])}
 
             tools_raw = row.get("secili_arac_kodlari_json") or "[]"
             try:
@@ -192,7 +221,7 @@ class AgentMemoryService:
             except Exception:
                 selected_tools = []
 
-            return {
+            resolved_cfg = {
                 "id": int(row["id"]),
                 "app_id": str(row.get("uygulama_id") or norm_app),
                 "agent_id": str(row.get("kod") or norm_agent),
@@ -205,6 +234,8 @@ class AgentMemoryService:
                 "secili_arac_kodlari": selected_tools,
                 "sistem_istemi": str(row.get("sistem_istemi") or ""),
             }
+            _AGENT_CONFIG_CACHE.set(cache_key, resolved_cfg)
+            return {**resolved_cfg, "secili_arac_kodlari": list(resolved_cfg["secili_arac_kodlari"])}
 
     @staticmethod
     def get_gateway_memory_tools_schema() -> List[Dict[str, Any]]:
@@ -523,7 +554,7 @@ class AgentMemoryService:
         """
         norm_app, norm_agent = self.normalize_identity(app_id, agent_id)
         clean_query = (query or "").strip()
-        effective_k = max(1, min(15, int(top_k or 5)))
+        effective_k = max(1, min(15, top_k or 5))
 
         if not norm_agent or not norm_app or not clean_query:
             return {"app_id": norm_app, "agent_id": norm_agent, "results": [], "total_found": 0}
@@ -685,7 +716,7 @@ class AgentMemoryService:
             "app_id": norm_app,
             "agent_id": norm_agent,
             "memory_type": valid_type,
-            "is_pinned": bool(is_pinned),
+            "is_pinned": is_pinned,
         }
 
     def recall_agent_conversations(
@@ -699,7 +730,7 @@ class AgentMemoryService:
         norm_app, norm_agent = self.normalize_identity(app_id, agent_id)
         if not norm_agent or not norm_app:
             return {"app_id": norm_app, "agent_id": norm_agent, "turns": []}
-        take = max(1, min(10, int(limit or 5)))
+        take = max(1, min(10, limit or 5))
         items: List[Dict[str, Any]] = []
         with postgres_db.connection() as conn:
             if query and query.strip():
@@ -1674,7 +1705,7 @@ class AgentMemoryService:
 
         def _on_obs_finish(fr: str) -> None:
             if fr:
-                obs_finish_holder[-1] = str(fr)
+                obs_finish_holder[-1] = fr
 
         try:
             llm_provider.stream_from_pollinations_web(
@@ -1785,7 +1816,7 @@ class AgentMemoryService:
                             f"cont_len={len(cont_prompt)} | existing_rows={len(csv_lines)}"
                         )
                         is_complete = False
-                is_physically_incomplete = bool(is_json_truncated)
+                is_physically_incomplete = is_json_truncated
                 if is_physically_incomplete and is_complete:
                     gateway_logger.info(
                         f"OBSERVER_TRUNCATION_OVERRIDE | mode={effective_mode} | "

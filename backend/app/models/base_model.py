@@ -24,6 +24,8 @@ class ModelCapabilities:
     function_calling: bool = True
     image_generation: bool = False
     json_mode: bool = True
+    supports_file_attachments: bool = False
+    supports_image_attachments: bool = False
 
 
 @runtime_checkable

@@ -1,8 +1,11 @@
-from typing import Optional
+from typing import Any, Dict, Optional
+import anyio
 from fastapi import APIRouter, Depends, Query, Request
 from app.core.dependencies import get_model_service
 from app.core.logger import gateway_logger
 from app.dtos.model_dto import ModelListResponseDTO
+from app.models.registry import model_registry
+from app.services.browser_tool_service import browser_tool_service
 from app.services.model_service import ModelService
 
 router = APIRouter(tags=["OpenAI Models"])
@@ -54,4 +57,37 @@ for _path in MODEL_LIST_PATHS:
         methods=["GET", "POST"],
         response_model=ModelListResponseDTO,
         include_in_schema=(_path == "/v1/models"),
+    )
+
+
+MODEL_PREWARM_PATHS = (
+    "/v1/models/{model_id}/prewarm",
+    "/models/{model_id}/prewarm",
+    "/api/v1/models/{model_id}/prewarm",
+    "/api/models/{model_id}/prewarm",
+)
+
+
+async def _handle_prewarm_model(model_id: str) -> Dict[str, Any]:
+    """AI Chat ekranında bir web modeli açıldığında sıcak tarayıcı yoksa arka planda hızlıca hazırlar."""
+    model_def = model_registry.get(model_id)
+    target_url = getattr(model_def, "target_url", None) if model_def else None
+    if not target_url:
+        return {"status": "not_web_model", "model": model_id}
+    use_proxy = bool(getattr(model_def, "use_proxy", True))
+    res = await anyio.to_thread.run_sync(
+        browser_tool_service.prewarm_target,
+        target_url,
+        use_proxy,
+        1,
+    )
+    return {"model": model_id, "target_url": target_url, **res}
+
+
+for _prewarm_path in MODEL_PREWARM_PATHS:
+    router.add_api_route(
+        _prewarm_path,
+        _handle_prewarm_model,
+        methods=["POST"],
+        include_in_schema=(_prewarm_path == "/v1/models/{model_id}/prewarm"),
     )

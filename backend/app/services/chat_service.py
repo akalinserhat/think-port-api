@@ -36,6 +36,7 @@ from app.repositories.conversation_repository import (
     ConversationRepository,
     conversation_event_broadcaster,
 )
+from app.repositories.state_store import store as default_store
 from app.services.auth_service import AuthService
 from app.services.model_service import ModelService
 from app.services.message_formatter_service import MessageFormatterService
@@ -105,6 +106,7 @@ class ChatService:
         self,
         request: ChatCompletionRequestDTO,
         user_ctx: AuthenticatedUserContextDTO,
+        auto_start: bool = True,
     ) -> ChatJobDTO:
         """
         Eşzamanlılık slotu ayırır, model takma adını (alias) normalize eder,
@@ -377,6 +379,15 @@ class ChatService:
         )
 
         self._channel_repo.create_channel(job_id)
+        default_store.start_conversation_job(
+            conversation_id=conversation.id,
+            job_id=job_id,
+            model=normalized_model,
+            provider=provider,
+            source=source,
+            status_text=f"{normalized_model} — İstek işleniyor...",
+        )
+        conversation_event_broadcaster.publish("job_started", conversation.id)
         job = ChatJobDTO(
             job_id=job_id,
             conversation_id=conversation.id,
@@ -406,8 +417,13 @@ class ChatService:
             f"| json_mode={self._formatter.is_json_mode_requested(normalized_rf)} "
             f"| files={[a.file_name for a in attachments]} | stream={request.stream}"
         )
-        asyncio.create_task(self._execute_ai_job(job))
+        if auto_start:
+            self.start_chat_job(job)
         return job
+
+    def start_chat_job(self, job: ChatJobDTO) -> None:
+        """Hazırlanan sohbet işini aktif asyncio event loop üzerinde başlatır."""
+        asyncio.create_task(self._execute_ai_job(job))
 
     async def build_sync_response(
         self,
@@ -1577,6 +1593,7 @@ class ChatService:
                 session_id=used_session,
             )
 
+        last_progress_pub = 0.0
         try:
             yield self._format_sse_chunk(
                 job.job_id,
@@ -1604,6 +1621,9 @@ class ChatService:
                             ttft_ms = int((time.perf_counter() - start_time) * 1000)
                         collected_reasoning.append(r_text)
                         completion_tokens += DocumentService.estimate_tokens(r_text)
+                        last_progress_pub = self._update_live_job_progress(
+                            job, "".join(collected_chunks), "".join(collected_reasoning), ttft_ms, last_progress_pub
+                        )
                         studio_content_piece: Optional[str] = None
                         if job.source == "studio":
                             if not studio_reasoning_started:
@@ -1627,6 +1647,9 @@ class ChatService:
                         ttft_ms = int((time.perf_counter() - start_time) * 1000)
                     collected_chunks.append(delta_text)
                     completion_tokens += DocumentService.estimate_tokens(delta_text)
+                    last_progress_pub = self._update_live_job_progress(
+                        job, "".join(collected_chunks), "".join(collected_reasoning), ttft_ms, last_progress_pub
+                    )
                     out_delta = delta_text
                     if job.source == "studio" and studio_reasoning_started and not studio_reasoning_closed:
                         studio_reasoning_closed = True
@@ -1794,6 +1817,33 @@ class ChatService:
         finally:
             _do_finalize()
 
+    @staticmethod
+    def _update_live_job_progress(
+        job: ChatJobDTO,
+        content: str,
+        reasoning: str,
+        ttft_ms: int,
+        last_pub: float,
+    ) -> float:
+        """Devam eden işin canlı akış durumunu günceller ve SSE olayını 350ms aralıkla yayınlar."""
+        if not job.conversation_id:
+            return last_pub
+        default_store.update_conversation_job(
+            conversation_id=job.conversation_id,
+            job_id=job.job_id,
+            phase="streaming",
+            status_text=f"{job.model} — Yanıt üretiliyor...",
+            content=content,
+            thinking_content=reasoning,
+            char_length=len(content),
+            ttft_ms=ttft_ms,
+        )
+        now = time.monotonic()
+        if now - last_pub >= 0.35:
+            conversation_event_broadcaster.publish("job_progress", job.conversation_id)
+            return now
+        return last_pub
+
     async def _collect_full_response(
         self, job: ChatJobDTO
     ) -> Tuple[str, int, str, int, Optional[List[Dict[str, Any]]], str]:
@@ -1816,6 +1866,7 @@ class ChatService:
         combined_reasoning = ""
         provider_finish_reason = "stop"
 
+        last_progress_pub = 0.0
         try:
             if channel:
                 while True:
@@ -1836,10 +1887,16 @@ class ChatService:
                             ttft_ms = int((time.perf_counter() - start_time) * 1000)
                         if payload.get("text"):
                             collected_reasoning.append(payload["text"])
+                            last_progress_pub = self._update_live_job_progress(
+                                job, "".join(collected), "".join(collected_reasoning), ttft_ms, last_progress_pub
+                            )
                     elif payload["event"] == "delta":
                         if ttft_ms == 0:
                             ttft_ms = int((time.perf_counter() - start_time) * 1000)
                         collected.append(payload["text"])
+                        last_progress_pub = self._update_live_job_progress(
+                            job, "".join(collected), "".join(collected_reasoning), ttft_ms, last_progress_pub
+                        )
                     elif payload["event"] == "tool_calls":
                         if payload.get("tool_calls"):
                             collected_tool_calls.extend(payload["tool_calls"])
@@ -1936,6 +1993,9 @@ class ChatService:
         """
         self._channel_repo.remove_channel(job.job_id)
         self._auth_service.release_concurrency_slot(job.user_id)
+        if job.conversation_id:
+            default_store.finish_conversation_job(job.conversation_id, job.job_id)
+            conversation_event_broadcaster.publish("job_finished", job.conversation_id)
         latency_ms = int((time.perf_counter() - start_time) * 1000)
         effective_ttft = ttft_ms or latency_ms
         clean_user_text, attachments, _ = (

@@ -10,7 +10,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, Generator, List, Optional
 
 try:
     from app.core.config import settings
@@ -33,14 +33,24 @@ except Exception:
     PG_RAG_DB = os.getenv("WEBAKUS_POSTGRES_DB", "webakus_db")
 
 try:
-    from app.repositories.postgres_driver import PgWireConnection
+    from app.repositories.postgres_driver import PgRow, PgWireConnection, PgWireConnectionPool
 except Exception:
     _pg_drv_path = Path(__file__).resolve().parent / "postgres_driver.py"
     _pg_spec = importlib.util.spec_from_file_location("postgres_driver", str(_pg_drv_path))
     assert _pg_spec and _pg_spec.loader
     _pg_mod = importlib.util.module_from_spec(_pg_spec)
     _pg_spec.loader.exec_module(_pg_mod)
+    PgRow = _pg_mod.PgRow
     PgWireConnection = _pg_mod.PgWireConnection
+    PgWireConnectionPool = _pg_mod.PgWireConnectionPool
+
+
+def _row_scalar(row: Optional[PgRow], key: int | str = 0, default: Any = 0) -> Any:
+    """`fetchone()` sonucundan `None` güvenli tekil hücre değeri okur."""
+    if row is None:
+        return default
+    val = row[key]
+    return default if val is None else val
 
 try:
     from app.core.security import hash_api_key
@@ -475,12 +485,37 @@ class PostgresDatabaseManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._pg_available: bool = True
-        self._initialize_database()
+        main_pool_max = int(os.getenv("PG_POOL_MAX_SIZE", "20"))
+        main_pool_min = int(os.getenv("PG_POOL_MIN_SIZE", "2"))
+        rag_pool_max = int(os.getenv("PG_RAG_POOL_MAX_SIZE", "10"))
+        rag_pool_min = int(os.getenv("PG_RAG_POOL_MIN_SIZE", "1"))
+        self._main_pool = PgWireConnectionPool(
+            factory=self._open_pg_connection,
+            min_size=main_pool_min,
+            max_size=main_pool_max,
+        )
+        self._rag_pool = PgWireConnectionPool(
+            factory=self._open_rag_pg_connection,
+            min_size=rag_pool_min,
+            max_size=rag_pool_max,
+        )
+        with self._lock:
+            self._initialize_database()
+
+    def warm_up_pools(self) -> None:
+        """Uygulama başlangıcında (lifespan startup) PostgreSQL bağlantı havuzlarını önceden ısıtır."""
+        self._main_pool.warm_up()
+        self._rag_pool.warm_up()
+
+    def close_pools(self) -> None:
+        """Uygulama kapanışında (lifespan shutdown) tüm havuz bağlantılarını temiz kapatır."""
+        self._main_pool.close_all()
+        self._rag_pool.close_all()
 
     @property
     def is_postgres_active(self) -> bool:
         """Aktif bağlantının PostgreSQL (thinkport_db) üzerinde çalışıp çalışmadığını döner."""
-        return bool(self._pg_available)
+        return self._pg_available
 
     def _open_pg_connection(self) -> PgWireConnection:
         return PgWireConnection(
@@ -514,35 +549,58 @@ class PostgresDatabaseManager:
             )
 
     @contextmanager
-    def connection(self) -> Iterator[PgWireConnection]:
-        """Thread-safe PostgreSQL (thinkport_db) bağlantı bağlamı döner."""
-        with self._lock:
-            pg_conn = self._open_pg_connection()
-            self._pg_available = True
+    def _pooled_connection(
+        self,
+        pool: PgWireConnectionPool[PgWireConnection],
+        mark_available: bool = False,
+    ) -> Generator[PgWireConnection, None, None]:
+        """Havuzdan paralel ve sağlık kontrollü PostgreSQL bağlantısı tahsis eder."""
+        pg_conn = pool.acquire()
+        try:
+            pg_conn.begin()
+        except OSError:
+            # Boşta beklerken sunucu tarafından kapatılmış bayat soket: yenisiyle 1 kez dene
+            pool.release(pg_conn, broken=True)
+            pg_conn = pool.acquire()
             try:
                 pg_conn.begin()
-                yield pg_conn
-                pg_conn.commit()
             except Exception:
-                pg_conn.rollback()
+                pool.release(pg_conn, broken=True)
                 raise
-            finally:
-                pg_conn.close()
+        except Exception:
+            pool.release(pg_conn, broken=True)
+            raise
+
+        if mark_available:
+            self._pg_available = True
+
+        broken = False
+        try:
+            yield pg_conn
+            pg_conn.commit()
+        except OSError:
+            broken = True
+            raise
+        except Exception:
+            try:
+                pg_conn.rollback()
+            except Exception:
+                broken = True
+            raise
+        finally:
+            pool.release(pg_conn, broken=broken or pg_conn.is_closed())
 
     @contextmanager
-    def rag_connection(self) -> Iterator[PgWireConnection]:
-        """Thread-safe PostgreSQL (`webakus_db` RAG tabloları) bağlantı bağlamı döner."""
-        with self._lock:
-            pg_conn = self._open_rag_pg_connection()
-            try:
-                pg_conn.begin()
-                yield pg_conn
-                pg_conn.commit()
-            except Exception:
-                pg_conn.rollback()
-                raise
-            finally:
-                pg_conn.close()
+    def connection(self) -> Generator[PgWireConnection, None, None]:
+        """Thread-safe, bağlantı havuzlu PostgreSQL (thinkport_db) bağlamı döner."""
+        with self._pooled_connection(self._main_pool, mark_available=True) as conn:
+            yield conn
+
+    @contextmanager
+    def rag_connection(self) -> Generator[PgWireConnection, None, None]:
+        """Thread-safe, bağlantı havuzlu PostgreSQL (`webakus_db` RAG tabloları) bağlamı döner."""
+        with self._pooled_connection(self._rag_pool, mark_available=False) as conn:
+            yield conn
 
     def _initialize_database(self) -> None:
         """Tabloları, `webakus_db` pgvector RAG şemasını ve başlangıç verilerini oluşturur."""
@@ -568,14 +626,14 @@ class PostgresDatabaseManager:
         try:
             from app.core.logger import gateway_logger
             with self.connection() as conn:
-                conv_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_conversations").fetchone()["c"]
-                msg_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_messages").fetchone()["c"]
-                att_cnt = conn.execute("SELECT COUNT(1) AS c FROM chat_message_attachments").fetchone()["c"]
-                ulog_cnt = conn.execute("SELECT COUNT(1) AS c FROM usage_logs").fetchone()["c"]
-                usr_cnt = conn.execute("SELECT COUNT(1) AS c FROM users").fetchone()["c"]
+                conv_cnt = _row_scalar(conn.execute("SELECT COUNT(1) AS c FROM chat_conversations").fetchone(), "c", 0)
+                msg_cnt = _row_scalar(conn.execute("SELECT COUNT(1) AS c FROM chat_messages").fetchone(), "c", 0)
+                att_cnt = _row_scalar(conn.execute("SELECT COUNT(1) AS c FROM chat_message_attachments").fetchone(), "c", 0)
+                ulog_cnt = _row_scalar(conn.execute("SELECT COUNT(1) AS c FROM usage_logs").fetchone(), "c", 0)
+                usr_cnt = _row_scalar(conn.execute("SELECT COUNT(1) AS c FROM users").fetchone(), "c", 0)
             with self.rag_connection() as rag_conn:
-                rag_doc_cnt = rag_conn.execute("SELECT COUNT(1) AS c FROM rag_cloud_documents").fetchone()["c"]
-                rag_chk_cnt = rag_conn.execute("SELECT COUNT(1) AS c FROM rag_document_chunks").fetchone()["c"]
+                rag_doc_cnt = _row_scalar(rag_conn.execute("SELECT COUNT(1) AS c FROM rag_cloud_documents").fetchone(), "c", 0)
+                rag_chk_cnt = _row_scalar(rag_conn.execute("SELECT COUNT(1) AS c FROM rag_document_chunks").fetchone(), "c", 0)
             gateway_logger.info(
                 f"PostgreSQL (pgvector) '{PG_DB}' & RAG '{PG_RAG_DB}' aktif | users={usr_cnt} | conversations={conv_cnt} | messages={msg_cnt} | attachments={att_cnt} | webakus_rag_docs={rag_doc_cnt} | webakus_rag_chunks={rag_chk_cnt} | usage_logs={ulog_cnt}"
             )
@@ -1187,10 +1245,14 @@ class PostgresDatabaseManager:
             "SELECT id, token_quota, created_at FROM users"
         ).fetchall()
         for u in user_rows:
-            alloc_count = conn.execute(
-                "SELECT COUNT(1) FROM user_token_allocations WHERE user_id = ?",
-                (u["id"],),
-            ).fetchone()[0]
+            alloc_count = _row_scalar(
+                conn.execute(
+                    "SELECT COUNT(1) FROM user_token_allocations WHERE user_id = ?",
+                    (u["id"],),
+                ).fetchone(),
+                0,
+                0,
+            )
             if alloc_count == 0:
                 conn.execute(
                     """
@@ -1211,7 +1273,7 @@ class PostgresDatabaseManager:
     @staticmethod
     def _seed_default_api_keys_if_empty(conn: PgWireConnection) -> None:
         """Kayıtlı aktif API anahtarı yoksa sistem yöneticisi (sys_usr_01) için varsayılan anahtar üretir."""
-        key_count = conn.execute("SELECT COUNT(1) FROM api_keys WHERE is_active = 1").fetchone()[0]
+        key_count = _row_scalar(conn.execute("SELECT COUNT(1) FROM api_keys WHERE is_active = 1").fetchone(), 0, 0)
         if key_count == 0:
             import secrets
             raw_key = f"sk-gw-{secrets.token_urlsafe(24)}"
@@ -1246,7 +1308,7 @@ class PostgresDatabaseManager:
     @staticmethod
     def _seed_default_pool_telemetry_if_empty(conn: PgWireConnection) -> None:
         """Bağlantı havuzu zaman serisi ve ölçeklenme olay tabloları boşsa örnek başlangıç verilerini yükler."""
-        snap_count = conn.execute("SELECT COUNT(1) FROM pool_metrics_snapshots").fetchone()[0]
+        snap_count = _row_scalar(conn.execute("SELECT COUNT(1) FROM pool_metrics_snapshots").fetchone(), 0, 0)
         now = datetime.now(timezone.utc)
         if snap_count == 0:
             # Son 60 dakikalık 5'er dakika aralıklı 12 zaman serisi noktası
@@ -1298,7 +1360,7 @@ class PostgresDatabaseManager:
                 rows,
             )
 
-        evt_count = conn.execute("SELECT COUNT(1) FROM pool_scaling_events").fetchone()[0]
+        evt_count = _row_scalar(conn.execute("SELECT COUNT(1) FROM pool_scaling_events").fetchone(), 0, 0)
         if evt_count == 0:
             events = [
                 (
@@ -1379,7 +1441,7 @@ class PostgresDatabaseManager:
             "nodes.manage",
             "settings.manage",
         ])
-        role_cnt = conn.execute("SELECT COUNT(1) FROM roles_permissions").fetchone()[0]
+        role_cnt = _row_scalar(conn.execute("SELECT COUNT(1) FROM roles_permissions").fetchone(), 0, 0)
         if role_cnt == 0:
             default_roles = [
                 (
@@ -1889,7 +1951,7 @@ class PostgresDatabaseManager:
             },
         ]
         observer_prompt = "\n\n".join(
-            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in observer_rules
+            f"[{str(r['baslik']).upper()}]:\n{r['icerik']}" for r in observer_rules
         )
 
         existing = conn.execute("SELECT COUNT(1) AS cnt FROM ai_agents").fetchone()
@@ -1933,7 +1995,7 @@ class PostgresDatabaseManager:
             },
         ]
         general_prompt = "\n\n".join(
-            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in general_rules
+            f"[{str(r['baslik']).upper()}]:\n{r['icerik']}" for r in general_rules
         )
 
         erp_rules = [
@@ -1967,7 +2029,7 @@ class PostgresDatabaseManager:
             },
         ]
         erp_prompt = "\n\n".join(
-            f"[{r['baslik'].upper()}]:\n{r['icerik']}" for r in erp_rules
+            f"[{str(r['baslik']).upper()}]:\n{r['icerik']}" for r in erp_rules
         )
 
         seed_agents = [

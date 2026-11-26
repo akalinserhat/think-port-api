@@ -1,4 +1,6 @@
+from functools import partial
 from typing import Optional
+import anyio
 from fastapi import Header
 from app.dtos.user_dto import AuthenticatedUserContextDTO
 from app.repositories.state_store import store
@@ -146,11 +148,14 @@ async def require_authenticated_user(
     effective_auth = authorization or x_api_key or api_key_header
     fallback_app_id = (x_app_id or "").strip() or (x_application_id or "").strip() or None
     fallback_agent_id = (x_agent_id or "").strip() or (x_agent_code or "").strip() or None
-    return auth_service.authenticate_and_authorize(
-        effective_auth,
-        x_user_id=x_user_id,
-        header_app_id=fallback_app_id,
-        header_agent_id=fallback_agent_id,
+    return await anyio.to_thread.run_sync(
+        partial(
+            auth_service.authenticate_and_authorize,
+            effective_auth,
+            x_user_id=x_user_id,
+            header_app_id=fallback_app_id,
+            header_agent_id=fallback_agent_id,
+        )
     )
 
 

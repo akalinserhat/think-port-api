@@ -2,6 +2,7 @@ from typing import List, Optional, Tuple
 from app.core.exceptions import forbidden_access_error, resource_not_found_error
 from app.core.security import hash_api_key
 from app.dtos.conversation_dto import (
+    ActiveConversationJobDTO,
     ConversationDetailDTO,
     ConversationSummaryDTO,
     CreateConversationRequestDTO,
@@ -10,6 +11,7 @@ from app.dtos.conversation_dto import (
 )
 from app.repositories.api_key_repository import ApiKeyRepository
 from app.repositories.conversation_repository import ConversationRepository, conversation_event_broadcaster
+from app.repositories.state_store import store as default_store
 from app.repositories.user_repository import UserRepository
 
 
@@ -56,7 +58,7 @@ class ConversationService:
         effective_user_id = user_id if is_admin else requester_id
         offset = max(0, (max(1, page) - 1) * max(1, page_size))
 
-        return self._conversation_repo.list_conversations(
+        items = self._conversation_repo.list_conversations(
             user_id=effective_user_id,
             model_id=model_id,
             source=source,
@@ -69,6 +71,12 @@ class ConversationService:
             limit=page_size,
             offset=offset,
         )
+        for item in items:
+            active_raw = default_store.get_active_conversation_job(item.id)
+            if active_raw:
+                item.is_processing = True
+                item.active_job = ActiveConversationJobDTO.model_validate(active_raw)
+        return items
 
     def get_conversation_or_404(
         self,
@@ -81,6 +89,10 @@ class ConversationService:
         if not detail:
             raise resource_not_found_error("Sohbet oturumu bulunamadı.")
         self._assert_conversation_access(detail.user_id, authorization, x_user_id)
+        active_raw = default_store.get_active_conversation_job(detail.id)
+        if active_raw:
+            detail.is_processing = True
+            detail.active_job = ActiveConversationJobDTO.model_validate(active_raw)
         return detail
 
     def create_conversation(

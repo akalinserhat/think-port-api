@@ -3,6 +3,9 @@ ThinkPort AI Gateway - Ana FastAPI Uygulama Fabrikası (main.py).
 OpenAI v1 uyumlu sohbet/model/görsel uç noktalarını, PostgreSQL pgvector RAG yönlendiricisini
 ve yönetim (Admin/Studio UI) yönlendiricilerini yapılandırır.
 """
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+import anyio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -38,9 +41,10 @@ def configure_exception_handlers(application: FastAPI) -> None:
 
     @application.exception_handler(HTTPException)
     async def openai_compatible_http_exception_handler(
-        request: Request,
-        exc: HTTPException,
+        _request: Request,
+        exc: Exception,
     ) -> JSONResponse:
+        assert isinstance(exc, HTTPException)
         if isinstance(exc.detail, dict) and "error" in exc.detail:
             return JSONResponse(
                 status_code=exc.status_code,
@@ -81,12 +85,31 @@ def register_routers(application: FastAPI) -> None:
     application.include_router(ui_router)
 
 
+@asynccontextmanager
+async def application_lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
+    """Uygulama başlangıcında DB bağlantı havuzlarını ısıtır, kapanışta temiz kapatır."""
+    from app.repositories.postgres_db import postgres_db
+
+    try:
+        await anyio.to_thread.run_sync(postgres_db.warm_up_pools)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            await anyio.to_thread.run_sync(postgres_db.close_pools)
+        except Exception:
+            pass
+
+
 def create_application() -> FastAPI:
     """FastAPI uygulama örneğini oluşturur ve yapılandırır (Application Factory)."""
     application = FastAPI(
         title=settings.app_title,
         version=settings.app_version,
         description=settings.app_description,
+        lifespan=application_lifespan,
     )
     configure_cors(application)
     configure_exception_handlers(application)

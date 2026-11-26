@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional
+import anyio
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import StreamingResponse
 from app.core.dependencies import get_chat_service, require_authenticated_user
@@ -55,7 +56,13 @@ async def create_chat_completion(
     if not request.agent_name and x_agent_name:
         request.agent_name = x_agent_name.strip() if x_agent_name else None
 
-    job = chat_service.initiate_chat_job(request, user_ctx)
+    job = await anyio.to_thread.run_sync(
+        chat_service.initiate_chat_job,
+        request,
+        user_ctx,
+        False,
+    )
+    chat_service.start_chat_job(job)
     if request.stream:
         headers = {**SSE_HEADERS, "X-Conversation-Id": job.conversation_id}
         return StreamingResponse(

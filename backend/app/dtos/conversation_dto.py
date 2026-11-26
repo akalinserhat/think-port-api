@@ -55,6 +55,22 @@ class ConversationMessageDTO(BaseModel):
     created_at: str
 
 
+class ActiveConversationJobDTO(BaseModel):
+    """Oturumda halihazırda devam eden (in-flight) API/Stüdyo isteğinin canlı durumu."""
+
+    job_id: str
+    model: str
+    provider: str = ""
+    source: Literal["studio", "api"] = "api"
+    phase: Literal["connect", "submitted", "streaming"] = "connect"
+    status_text: str = ""
+    content: str = ""
+    thinking_content: str = ""
+    char_length: int = 0
+    ttft_ms: int = 0
+    started_at: float = 0.0
+
+
 class ConversationSummaryDTO(BaseModel):
     """Sohbet geçmişi listesinde gösterilen oturum özeti DTO'su."""
 
@@ -73,6 +89,8 @@ class ConversationSummaryDTO(BaseModel):
     total_tokens: int = 0
     attachment_names: List[str] = Field(default_factory=list)
     last_message_preview: str = ""
+    is_processing: bool = False
+    active_job: Optional[ActiveConversationJobDTO] = None
     created_at: str
     updated_at: str
 

@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+import anyio
 from fastapi import Header
 from app.core.security import generate_api_key_bundle as generate_api_key, hash_api_key
 from app.repositories.state_store import InMemoryStateStore, store
@@ -27,7 +28,10 @@ class AuthAndQuotaManager:
         authorization: Optional[str] = Header(default=None, description="Bearer sk-gw-..."),
     ) -> Dict[str, Any]:
         """İsteği doğrular ve sözlük biçiminde kullanıcı bağlamını döner."""
-        ctx = self._auth_service.authenticate_and_authorize(authorization)
+        ctx = await anyio.to_thread.run_sync(
+            self._auth_service.authenticate_and_authorize,
+            authorization,
+        )
         return ctx.model_dump()
 
 

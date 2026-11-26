@@ -21,6 +21,7 @@ import {
   MessageSquare,
   Eye,
   Zap,
+  Loader2,
 } from 'lucide-react';
 import {
   BaseListPage,
@@ -516,7 +517,7 @@ function computeConversationsSignature(items: ConversationSummaryDTO[]): string 
   return items
     .map(
       (i) =>
-        `${i.id}:${i.updated_at}:${i.total_messages}:${i.total_tokens}:${i.is_pinned ? 1 : 0}:${i.is_archived ? 1 : 0}:${i.is_deleted ? 1 : 0}:${i.title}:${i.last_message_preview || ''}`
+        `${i.id}:${i.updated_at}:${i.total_messages}:${i.total_tokens}:${i.is_pinned ? 1 : 0}:${i.is_archived ? 1 : 0}:${i.is_deleted ? 1 : 0}:${i.is_processing ? 1 : 0}:${i.active_job?.char_length || 0}:${i.title}:${i.last_message_preview || ''}`
     )
     .join('|');
 }
@@ -534,7 +535,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
   onRefreshState,
   onShowToast,
 }) => {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
   const locale = i18n.language?.startsWith('en') ? 'en-US' : 'tr-TR';
@@ -572,6 +573,40 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
     initialDefaults.chatSystemPrompt
   );
   const stopRequestedRef = useRef<boolean>(false);
+
+  // AI Chat ekranında bir web modeli açıldığında sıcak tarayıcı yoksa hızlıca hazırla
+  useEffect(() => {
+    if (viewMode !== 'chat' || !chatModelId) return;
+    const modelObj = models.find((m) => m.id === chatModelId);
+    const isWebModel =
+      Boolean((modelObj as { target_url?: string } | undefined)?.target_url) ||
+      (modelObj?.provider || '').toLowerCase().includes('web') ||
+      chatModelId.endsWith('-web');
+    if (isWebModel) {
+      void chatService.prewarmModel(chatModelId, apiKey);
+    }
+  }, [viewMode, chatModelId, models, apiKey]);
+
+  // Canlı yanıt üretim aşamaları, telemetri logları ve akış metrikleri
+  const [liveGenStatusText, setLiveGenStatusText] = useState<string>('');
+  const [liveGenStageLabel, setLiveGenStageLabel] = useState<string>('');
+  const [liveGenStageDetail, setLiveGenStageDetail] = useState<string>('');
+  const [liveGenSteps, setLiveGenSteps] = useState<
+    { id?: string; label: string; detail?: string; status: 'done' | 'active' | 'pending' }[]
+  >([]);
+  const [liveGenLogs, setLiveGenLogs] = useState<string[]>([]);
+  const [liveStreamedChars, setLiveStreamedChars] = useState<number>(0);
+  const [liveTtftMs, setLiveTtftMs] = useState<number>(0);
+
+  const resetLiveGenState = useCallback(() => {
+    setLiveGenStatusText('');
+    setLiveGenStageLabel('');
+    setLiveGenStageDetail('');
+    setLiveGenSteps([]);
+    setLiveGenLogs([]);
+    setLiveStreamedChars(0);
+    setLiveTtftMs(0);
+  }, []);
 
   // Seçilen sohbetin mesaj detaylarını hızlı görmek için Popup durumu
   const [detailModalOpen, setDetailModalOpen] = useState<boolean>(false);
@@ -662,13 +697,69 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
     }));
   }, [models]);
 
-  // Aktif sohbet oturumunun mesaj listesi
+  // Harici API üzerinden devam eden (in-flight) aktif iş varsa yakala
+  const externalActiveJob = useMemo(() => {
+    if (isGenerating) return null;
+    if (
+      activeDetailForInspector &&
+      String(activeDetailForInspector.id) === String(activeChatSessionId) &&
+      activeDetailForInspector.is_processing &&
+      activeDetailForInspector.active_job
+    ) {
+      return activeDetailForInspector.active_job;
+    }
+    return null;
+  }, [isGenerating, activeDetailForInspector, activeChatSessionId]);
+
+  const externalGenSteps = useMemo(() => {
+    if (!externalActiveJob) return [];
+    const phase = externalActiveJob.phase || 'connect';
+    return [
+      {
+        id: 'dispatch',
+        label: t('chat.liveStepDispatch'),
+        detail: externalActiveJob.model,
+        status: 'done' as const,
+      },
+      {
+        id: 'model',
+        label: t('chat.liveStepModel'),
+        status: (phase === 'streaming' ? 'done' : 'active') as 'done' | 'active' | 'pending',
+      },
+      {
+        id: 'stream',
+        label: t('chat.liveStepStream'),
+        status: (phase === 'streaming' ? 'active' : 'pending') as 'done' | 'active' | 'pending',
+      },
+    ];
+  }, [externalActiveJob, t]);
+
+  // Aktif sohbet oturumunun mesaj listesi (+ varsa harici API canlı akış balonu)
   const activeChatMessages = useMemo(() => {
     const found =
       chatSessions.find((s) => String(s.id) === String(activeChatSessionId)) ||
       chatSessions[0];
-    return found?.messages || [];
-  }, [chatSessions, activeChatSessionId]);
+    const baseMsgs = found?.messages || [];
+    if (externalActiveJob && (externalActiveJob.content || externalActiveJob.thinking_content)) {
+      const liveExternalMsg: ChatMessage = {
+        id: `live-${externalActiveJob.job_id}`,
+        role: 'assistant',
+        content: externalActiveJob.content || '',
+        thinkingContent: externalActiveJob.thinking_content || undefined,
+        timestamp: new Date().toISOString(),
+        model: externalActiveJob.model,
+        provider: externalActiveJob.provider || 'ThinkPort API',
+        rawPayload: {
+          request_id: externalActiveJob.job_id,
+          role: 'assistant',
+          model: externalActiveJob.model,
+          status: 'streaming',
+        },
+      };
+      return [...baseMsgs, liveExternalMsg];
+    }
+    return baseMsgs;
+  }, [chatSessions, activeChatSessionId, externalActiveJob]);
 
   // Aktif kullanıcı değiştiğinde ilgili kullanıcının API anahtarını da senkronize et ve listeyi yenile
   const handleSwitchActiveUser = useCallback(
@@ -1277,6 +1368,79 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
         let serverPersistedTurn = false;
         let ttftMs = 0;
 
+        const isWebBrowserModel =
+          activeModel.includes('-web') ||
+          (selectedModelObj?.provider || '').toLowerCase().includes('web');
+        const cleanActiveModelName =
+          selectedModelObj?.name.replace(/\s*\(Web Gateway\)\s*/i, '').trim() || activeModel;
+
+        const buildSteps = (
+          phase: 'connect' | 'submitted' | 'streaming'
+        ): { id: string; label: string; detail?: string; status: 'done' | 'active' | 'pending' }[] => {
+          if (isWebBrowserModel) {
+            return [
+              {
+                id: 'dispatch',
+                label: t('chat.liveStepDispatch'),
+                detail: cleanActiveModelName,
+                status: 'done',
+              },
+              {
+                id: 'browser',
+                label: t('chat.liveStepBrowser'),
+                status: phase === 'connect' ? 'active' : 'done',
+              },
+              {
+                id: 'model',
+                label: t('chat.liveStepModel'),
+                status:
+                  phase === 'submitted' ? 'active' : phase === 'streaming' ? 'done' : 'pending',
+              },
+              {
+                id: 'stream',
+                label: t('chat.liveStepStream'),
+                status: phase === 'streaming' ? 'active' : 'pending',
+              },
+            ];
+          }
+          return [
+            {
+              id: 'dispatch',
+              label: t('chat.liveStepDispatch'),
+              detail: cleanActiveModelName,
+              status: 'done',
+            },
+            {
+              id: 'model',
+              label: t('chat.liveStepModel'),
+              status: phase === 'streaming' ? 'done' : 'active',
+            },
+            {
+              id: 'stream',
+              label: t('chat.liveStepStream'),
+              status: phase === 'streaming' ? 'active' : 'pending',
+            },
+          ];
+        };
+
+        setLiveStreamedChars(0);
+        setLiveTtftMs(0);
+        setLiveGenLogs([]);
+        setLiveGenStageLabel(
+          isWebBrowserModel ? t('chat.liveStageBrowserConnect') : t('chat.liveStageConnect')
+        );
+        setLiveGenStatusText(
+          `${cleanActiveModelName} — ${
+            isWebBrowserModel ? t('chat.liveStageBrowserConnect') : t('chat.liveStageConnect')
+          }...`
+        );
+        setLiveGenStageDetail(
+          isWebBrowserModel
+            ? t('chat.liveStepBrowser')
+            : t('chat.liveStepModel')
+        );
+        setLiveGenSteps(buildSteps('connect'));
+
         const updateLiveAssistantBubble = () => {
           const {
             thinkingText: tagThoughts,
@@ -1393,8 +1557,14 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             if (stopRequestedRef.current) return;
             if (!ttftMs) {
               ttftMs = Date.now() - requestStartTime;
+              setLiveTtftMs(ttftMs);
             }
             streamedText += delta;
+            setLiveStreamedChars(streamedText.length);
+            setLiveGenStageLabel(t('chat.liveStageStreaming'));
+            setLiveGenStatusText(`${cleanActiveModelName} — ${t('chat.liveStageStreaming')}...`);
+            setLiveGenStageDetail(t('chat.liveStepStream'));
+            setLiveGenSteps(buildSteps('streaming'));
             updateLiveAssistantBubble();
           },
           (resolvedConvId) => {
@@ -1416,8 +1586,35 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
             if (stopRequestedRef.current) return;
             if (!ttftMs) {
               ttftMs = Date.now() - requestStartTime;
+              setLiveTtftMs(ttftMs);
             }
             streamedReasoning += reasoningPiece;
+            const lines = reasoningPiece
+              .split('\n')
+              .map((l) => l.trim())
+              .filter(Boolean);
+            if (lines.length > 0) {
+              const latestLine = lines[lines.length - 1];
+              setLiveGenLogs((prev) => [...prev, ...lines].slice(-5));
+              setLiveGenStageDetail(latestLine);
+              const lower = latestLine.toLowerCase();
+              if (lower.includes('gönderildi') || lower.includes('bekleniyor')) {
+                setLiveGenStageLabel(t('chat.liveStageSubmitted'));
+                setLiveGenStatusText(`${cleanActiveModelName} — ${t('chat.liveStageSubmitted')}...`);
+                setLiveGenSteps(buildSteps('submitted'));
+              } else if (lower.includes('akış') || lower.includes('üretmeye başladı')) {
+                setLiveGenStageLabel(t('chat.liveStageStreaming'));
+                setLiveGenStatusText(`${cleanActiveModelName} — ${t('chat.liveStageStreaming')}...`);
+                setLiveGenSteps(buildSteps('streaming'));
+              } else if (lower.includes('proxy') || lower.includes('sekme') || lower.includes('bağlantı')) {
+                setLiveGenStageLabel(t('chat.liveStageBrowserConnect'));
+                setLiveGenStatusText(`${cleanActiveModelName} — ${t('chat.liveStageBrowserConnect')}...`);
+                setLiveGenSteps(buildSteps('connect'));
+              } else {
+                setLiveGenStageLabel(t('chat.liveStageThinking'));
+                setLiveGenSteps(buildSteps('submitted'));
+              }
+            }
             updateLiveAssistantBubble();
           },
           (toolCallsPiece) => {
@@ -1506,6 +1703,7 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           )
         );
       } finally {
+        resetLiveGenState();
         setIsGenerating(false);
       }
     },
@@ -1516,6 +1714,8 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
       models,
       activeChatMessages,
       setIsGenerating,
+      resetLiveGenState,
+      t,
       chatSystemPrompt,
       currentUser,
       activeUserId,
@@ -2113,6 +2313,24 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
                 {isApi ? <Terminal size={10} /> : <Sparkles size={10} />}
                 {isApi ? 'API' : 'Stüdyo'}
               </span>
+              {row.is_processing && (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    fontSize: '10.5px',
+                    fontWeight: 600,
+                    background: 'rgba(99, 102, 241, 0.14)',
+                    color: 'var(--accent-primary, #6366f1)',
+                  }}
+                >
+                  <Loader2 size={10} className="spin" />
+                  İşleniyor...
+                </span>
+              )}
             </div>
           );
         },
@@ -2535,9 +2753,37 @@ export const ChatStudioView: React.FC<ChatStudioViewProps> = ({
           onSendMessage={handleChatSendMessage}
           onRegenerateMessage={handleChatRegenerateMessage}
           onMessageFeedback={handleChatMessageFeedback}
-          isGenerating={isGenerating}
+          isGenerating={isGenerating || Boolean(externalActiveJob)}
+          generatingStatusText={
+            (isGenerating ? liveGenStatusText : externalActiveJob?.status_text) || undefined
+          }
+          generatingStageLabel={
+            (isGenerating
+              ? liveGenStageLabel
+              : externalActiveJob
+                ? externalActiveJob.phase === 'streaming'
+                  ? t('chat.liveStepStream')
+                  : t('chat.liveStepModel')
+                : '') || undefined
+          }
+          generatingStageDetail={
+            (isGenerating ? liveGenStageDetail : externalActiveJob?.model) || undefined
+          }
+          generatingSteps={
+            isGenerating
+              ? liveGenSteps.length > 0
+                ? liveGenSteps
+                : undefined
+              : externalGenSteps.length > 0
+                ? externalGenSteps
+                : undefined
+          }
+          generatingLogs={liveGenLogs.length > 0 ? liveGenLogs : undefined}
+          liveStreamedChars={isGenerating ? liveStreamedChars : externalActiveJob?.char_length || 0}
+          liveTtftMs={isGenerating ? liveTtftMs : externalActiveJob?.ttft_ms || 0}
           onStopGeneration={() => {
             stopRequestedRef.current = true;
+            resetLiveGenState();
             setIsGenerating(false);
           }}
           systemPrompt={chatSystemPrompt}
